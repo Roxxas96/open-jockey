@@ -36,8 +36,59 @@ pub(crate) const GHOST_HEADPHONE_MIX: usize = 3;
 const _: () = assert!(GLOBAL_GHOSTS > GHOST_HEADPHONE_MIX);
 /// How many events a frame keeps, newest last.
 pub const EVENTS_KEPT: usize = 20;
-/// How long an event shows in the top bar.
+/// How long an event shows in the footer.
 pub const EVENT_SHOWN: Duration = Duration::from_secs(8);
+
+/// The kind of a background job the footer shows a pill for; the footer lists them in this
+/// order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum JobKind {
+    Analysis,
+    Covers,
+    Scan,
+    Import,
+    Export,
+    Stems,
+}
+
+/// Where a background job is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    Running,
+    /// Asked to pause; it finishes its current item first.
+    Pausing,
+    Paused,
+}
+
+/// What the footer asks of a background job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobOp {
+    Pause,
+    Resume,
+    Stop,
+}
+
+/// One background job, as its pill in the footer shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobView {
+    pub kind: JobKind,
+    /// What it is doing, such as "Analysing" or "Scanning Music…".
+    pub label: String,
+    /// Items done and in all; both `None` for a job that cannot count (no bar is drawn).
+    pub done: Option<usize>,
+    pub total: Option<usize>,
+    /// The time left, once the session can tell.
+    pub eta: Option<Duration>,
+    pub state: JobState,
+    /// The item it is on, shown when the pointer rests on the pill.
+    pub current: Option<String>,
+    /// A word on its state, such as "Waiting for network".
+    pub note: Option<String>,
+    pub can_pause: bool,
+    pub can_stop: bool,
+    /// Why the buttons are disabled, shown as their tooltip; `None` while they work.
+    pub locked: Option<&'static str>,
+}
 
 /// A value one thread publishes and others read. Publishing swaps a pointer and reading
 /// clones one: the lock is held for nothing else, so neither side waits on the other's
@@ -400,6 +451,8 @@ pub struct ControlFrame {
     pub export: ExportView,
     /// The session's answer to the latest [`LibraryStep::AskDelete`](crate::LibraryStep).
     pub delete_check: Option<DeleteCheck>,
+    /// The background jobs running or paused, ordered by [`JobKind`].
+    pub jobs: Vec<JobView>,
 }
 
 /// What deleting a [`DeleteTarget`] would do, as the session found when the window asked.
@@ -441,12 +494,13 @@ impl Default for ControlFrame {
             import: ImportView::default(),
             export: ExportView::default(),
             delete_check: None,
+            jobs: Vec::new(),
         }
     }
 }
 
 impl ControlFrame {
-    /// The top bar's status: the newest event while it shows, else the first status line.
+    /// The footer's message: the newest event while it shows, else the first status line.
     pub fn status_line(&self, now: Instant) -> &str {
         self.status_line_with(now, None)
     }

@@ -60,7 +60,7 @@ fn the_zoom_buttons_ask_for_steps() {
 }
 
 #[test]
-fn a_long_status_is_cut_short_at_the_smallest_window() {
+fn a_long_message_is_cut_short_at_the_smallest_window() {
     let frame = ui::ControlFrame {
         error: Some("a very long reason the session stopped, ".repeat(8)),
         ..ui::ControlFrame::default()
@@ -70,16 +70,13 @@ fn a_long_status_is_cut_short_at_the_smallest_window() {
         .with_size([1024.0, 700.0])
         .build_ui(|ui| ui::root(ui, &frame, None, &mut screen));
     harness.run_steps(3);
+    // The footer's copy of the message is the lowest.
     let status = harness
         .get_all_by_label_contains("a very long reason")
         .map(|n| n.rect())
-        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
         .unwrap();
-    let right = harness.get_by_label("no controller").rect();
-    let cpu = harness.get_by_label("CPU \u{2013}").rect();
-    assert!(
-        status.right() < cpu.left().min(right.left()),
-        "{status:?} {cpu:?}"
-    );
+    let footer = harness.get_by_label("footer").rect();
+    assert!(footer.contains_rect(status), "{status:?} {footer:?}");
     assert!(status.right() <= 1024.0);
 }

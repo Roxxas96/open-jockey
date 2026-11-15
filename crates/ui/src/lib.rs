@@ -10,6 +10,7 @@ pub mod cover;
 pub mod deck;
 pub mod delete_dialog;
 mod fonts;
+pub mod footer;
 pub mod hotcue_menu;
 pub mod layout;
 mod menu;
@@ -35,8 +36,8 @@ pub use command::{
 };
 pub use model::{
     ControlFrame, DeckInfo, DeleteCheck, EVENT_SHOWN, EVENTS_KEPT, ExportChoice, ExportSummary,
-    ExportView, GHOSTS, GLOBAL_GHOSTS, HotcueMark, ImportSummary, ImportView, PlaylistLabel,
-    Published, SettingRow, StickLabel, TrackLabel,
+    ExportView, GHOSTS, GLOBAL_GHOSTS, HotcueMark, ImportSummary, ImportView, JobKind, JobOp,
+    JobState, JobView, PlaylistLabel, Published, SettingRow, StickLabel, TrackLabel,
 };
 pub use view::{
     ColourScheme, JogDisplay, Layout, MAX_SHARE, MIN_SHARE, PanelSizes, TimeMode, ViewState,
@@ -217,6 +218,18 @@ pub fn root_with_reads(
             )
         });
     landmark(&top_bar.response, "top bar");
+    // The footer takes the bottom row; the panels above and the browser share the rest.
+    let footer = egui::Panel::bottom("footer")
+        .frame(
+            egui::Frame::new()
+                .fill(p.panel)
+                .inner_margin(egui::Margin::symmetric(6, 2)),
+        )
+        .show_separator_line(false)
+        .exact_size(footer::ROW_HEIGHT + 4.0)
+        .resizable(false)
+        .show(ui, |ui| footer::show(ui, frame, &screen.commands));
+    landmark(&footer.response, "footer");
     let lanes = |ui: &mut egui::Ui, screen: &mut Screen, drags: &mut Drags| {
         let height = drags.sizes.lanes * window.y;
         let (drag, top) = row_panel(ui, "waveform_lanes", height, &p, |ui| {

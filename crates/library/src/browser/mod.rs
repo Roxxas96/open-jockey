@@ -121,6 +121,9 @@ pub struct BrowserView {
     pub list_offset: usize,
     /// How many rows the whole list has.
     pub list_count: usize,
+    /// The total length of the list's tracks in seconds; `None` for a folder's list, which
+    /// counts files.
+    pub list_seconds: Option<f64>,
     pub list_cursor: usize,
     /// The text the list is filtered by.
     pub search: Option<String>,
@@ -181,6 +184,8 @@ enum Items {
 struct List {
     items: Items,
     count: usize,
+    /// The playlist list's total length in seconds.
+    seconds: Option<f64>,
     cursor: usize,
     /// The list position of `rows[0]`.
     offset: usize,
@@ -212,9 +217,16 @@ impl List {
                 (Items::Playlist { id: *id, query }, count)
             }
         };
+        let seconds = match &items {
+            Items::Playlist { id, query } => {
+                Some(reader.playlist_seconds(*id, query.text.as_deref())?)
+            }
+            _ => None,
+        };
         let mut list = Self {
             items,
             count,
+            seconds,
             ..Self::default()
         };
         list.seek(reader, 0)?;
@@ -539,6 +551,7 @@ impl Browser {
             list: self.list.rows.clone(),
             list_offset: self.list.offset,
             list_count: self.list.count,
+            list_seconds: self.list.seconds,
             list_cursor: self.list.cursor,
             search: self.query.text.clone(),
             sort: self.query.sort.map(|s| (s.key, s.descending)),
