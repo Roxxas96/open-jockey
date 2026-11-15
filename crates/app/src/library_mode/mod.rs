@@ -38,9 +38,11 @@ use library::{
 use crate::console::ConsoleCommand;
 use crate::format::{bpm_text, grid_text, key_text, notation_from_setting, safe, track_name};
 use crate::printer::Printer;
+use crate::session::jobs::{AnalysisFacts, Pace, analysis_job};
 pub use delete::{SystemTrash, Trash};
 use memory_sync::{MemoryAction, MemorySync, engine_grid};
 use stem_jobs::{Reply, StemsControl, StemsSetup};
+use ui::{JobKind, JobOp, JobView};
 use worker::{DeckFiles, Event, Job};
 
 /// How often failed writes, analysis and the watcher are checked, and the most often the
@@ -109,8 +111,16 @@ pub struct LibraryMode {
     /// still in progress completed); one that fails on the same file is not retried
     /// until the next session or `library analyze`.
     enqueued: HashMap<i64, FileStamp>,
-    /// How many analysis jobs were queued since the start.
+    /// How many analysis jobs were queued since the start, less the ones Stop dropped.
     queued_total: usize,
+    /// What `queued_total` was when the analysis last went idle: the pill counts the run
+    /// since, so a new batch starts again at 0.
+    batch_base: usize,
+    /// The time left of the analysis run.
+    pace: Pace,
+    /// Stop was pressed and tracks in flight are still finishing: no pill until new
+    /// tracks are queued or they end.
+    analysis_stopped: bool,
     /// Analysis is held to [`WORKERS_WHILE_PLAYING`] because a deck is playing.
     throttled: bool,
     /// The last value saved this session for each cue point and hotcue, as frames bits and
@@ -147,7 +157,6 @@ pub struct LibraryMode {
     delete_check: Option<ui::DeleteCheck>,
     notation: KeyNotation,
     browser: Option<BrowserView>,
-    analysis_status: Option<String>,
     last_poll: Instant,
     refresh_wanted: bool,
     /// Set from another thread that changed the library: a refresh is wanted.
@@ -256,6 +265,9 @@ impl LibraryMode {
             analyzer: Some(analyzer),
             enqueued: HashMap::new(),
             queued_total: 0,
+            batch_base: 0,
+            pace: Pace::new(),
+            analysis_stopped: false,
             throttled: false,
             latest_memory: HashMap::new(),
             retried_memory: HashSet::new(),
@@ -278,7 +290,6 @@ impl LibraryMode {
             delete_check: None,
             notation,
             browser: None,
-            analysis_status: None,
             last_poll: Instant::now(),
             refresh_wanted: false,
             changed_elsewhere: Arc::default(),
@@ -302,6 +313,7 @@ impl LibraryMode {
             .collect();
         if let (Some(analyzer), false) = (&self.analyzer, new.is_empty()) {
             self.queued_total += new.len();
+            self.analysis_stopped = false;
             analyzer.enqueue(&new, false);
         }
     }
@@ -641,7 +653,7 @@ impl LibraryMode {
         if now.duration_since(self.last_poll) >= POLL_EVERY {
             self.last_poll = now;
             self.report_failed_writes(printer);
-            self.poll_analysis(printer);
+            self.poll_analysis(now, printer);
             self.poll_watcher(printer);
             let due = self
                 .last_refresh
@@ -1036,17 +1048,25 @@ impl LibraryMode {
         }
     }
 
-    fn poll_analysis(&mut self, printer: &Printer) {
+    fn poll_analysis(&mut self, now: Instant, printer: &Printer) {
         let Some(analyzer) = &self.analyzer else {
             return;
         };
         let p = analyzer.progress();
-        let finished = p.done + p.skipped + p.failed_count;
-        let total = self.queued_total;
-        let status = (p.queued > 0).then(|| format!("analyzing {}/{total}", finished.min(total)));
-        if status != self.analysis_status {
-            self.analysis_status = status;
-            self.dirty = true;
+        if p.queued == 0 {
+            // Idle: the run is over. A pause or a stop belonged to it, so the next batch
+            // starts running again, from 0.
+            if analyzer.paused() {
+                analyzer.set_paused(false);
+            }
+            self.analysis_stopped = false;
+            self.batch_base = self.queued_total;
+            self.pace = Pace::new();
+        } else if analyzer.paused() {
+            self.pace.pause();
+        } else {
+            let (done, total) = self.analysis_counts(&p);
+            self.pace.sample(now, done, total);
         }
         if p.done != self.last_done {
             self.last_done = p.done;
@@ -1072,6 +1092,68 @@ impl LibraryMode {
                 warnings.len() - REPORTS_SHOWN
             ));
         }
+    }
+
+    /// Tracks finished and queued in the current run, for the pill.
+    fn analysis_counts(&self, p: &library::AnalysisProgress) -> (usize, usize) {
+        let finished = p.done + p.skipped + p.failed_count;
+        let total = self.queued_total.saturating_sub(self.batch_base);
+        (finished.saturating_sub(self.batch_base).min(total), total)
+    }
+
+    /// The background jobs for the footer, ordered by kind: the analysis while tracks
+    /// wait or run.
+    pub fn jobs(&self, now: Instant) -> Vec<JobView> {
+        let mut jobs = Vec::new();
+        if let Some(analyzer) = &self.analyzer {
+            let p = analyzer.progress();
+            let (done, total) = self.analysis_counts(&p);
+            let eta = self
+                .pace
+                .eta(now)
+                .map(|left| Duration::from_secs(left.as_secs_f64().round() as u64));
+            jobs.extend(analysis_job(AnalysisFacts {
+                queued: p.queued,
+                active: p.active,
+                done,
+                total,
+                paused: analyzer.paused(),
+                stopped: self.analysis_stopped,
+                current: analyzer.current(),
+                eta,
+            }));
+        }
+        jobs
+    }
+
+    /// The footer's pause, resume or stop of a background job.
+    ///
+    /// A pause is the user's, in memory only, and holds until resumed (or the analysis
+    /// goes idle): playing a deck changes only the throttle. Stop drops the tracks
+    /// waiting and forgets that they were queued, so a rescan or a relaunch queues them
+    /// again; tracks in flight finish.
+    pub fn job(&mut self, kind: JobKind, op: JobOp) {
+        if kind != JobKind::Analysis {
+            return;
+        }
+        let Some(analyzer) = &self.analyzer else {
+            return;
+        };
+        match op {
+            JobOp::Pause => analyzer.set_paused(true),
+            JobOp::Resume => analyzer.set_paused(false),
+            JobOp::Stop => {
+                let dropped = analyzer.clear_queue();
+                analyzer.set_paused(false);
+                for id in &dropped {
+                    self.enqueued.remove(id);
+                }
+                self.queued_total = self.queued_total.saturating_sub(dropped.len());
+                self.analysis_stopped = true;
+                self.pace = Pace::new();
+            }
+        }
+        self.dirty = true;
     }
 
     fn poll_watcher(&mut self, printer: &Printer) {
@@ -1383,11 +1465,7 @@ impl LibraryMode {
         engine: &EngineController,
         fx_slots: &[[engine::EffectKind; 3]; 4],
     ) -> Vec<String> {
-        let mut lines = vec![browser_line(
-            self.browser.as_ref(),
-            self.notation,
-            self.analysis_status.as_deref(),
-        )];
+        let mut lines = vec![browser_line(self.browser.as_ref(), self.notation)];
         for deck in DeckId::ALL {
             let snap = engine.deck(deck);
             if snap.loaded {
@@ -1650,14 +1728,10 @@ fn grid_edit(edit: GridEditRequest, sample_rate: u32, playhead: f64) -> GridEdit
     }
 }
 
-/// `▸ Playlists ▸ Peak time  12/48  Artist – Title  128.00 BPM  8A  •`, with the
-/// analysis progress after it.
-fn browser_line(
-    view: Option<&BrowserView>,
-    notation: KeyNotation,
-    analysis: Option<&str>,
-) -> String {
-    let mut line = match view {
+/// `▸ Playlists ▸ Peak time  12/48  Artist – Title  128.00 BPM  8A  •`. The analysis
+/// progress is the footer's pill, not part of this line.
+fn browser_line(view: Option<&BrowserView>, notation: KeyNotation) -> String {
+    match view {
         None => "▸ reading the library…".to_owned(),
         Some(view) => {
             let index = if view.count == 0 { 0 } else { view.index + 1 };
@@ -1680,11 +1754,7 @@ fn browser_line(
             }
             line
         }
-    };
-    if let Some(analysis) = analysis {
-        line.push_str(&format!("   {analysis}"));
     }
-    line
 }
 
 /// A deck's line: time, the stems' state, BPM at the current tempo once analyzed, and the
@@ -1822,7 +1892,7 @@ mod tests {
             ..empty_view()
         };
         assert_eq!(
-            browser_line(Some(&view), KeyNotation::Camelot, None),
+            browser_line(Some(&view), KeyNotation::Camelot),
             "▸ Playlists ▸ Peak time  12/48  Artist – Title  128.00 BPM  8A  •"
         );
         let empty = BrowserView {
@@ -1830,8 +1900,8 @@ mod tests {
             ..empty_view()
         };
         assert_eq!(
-            browser_line(Some(&empty), KeyNotation::Camelot, Some("analyzing 12/340")),
-            "▸ Macintosh HD  0/0   analyzing 12/340"
+            browser_line(Some(&empty), KeyNotation::Camelot),
+            "▸ Macintosh HD  0/0"
         );
     }
 
@@ -2408,6 +2478,79 @@ mod tests {
         mode.set_playing(false);
         assert_eq!(limit(&mode), usize::MAX);
         mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    fn new_tracks(
+        mode: &mut LibraryMode,
+        ids: &[i64],
+        engine: &mut EngineController,
+        printer: &Printer,
+    ) {
+        let tracks = ids.iter().map(|&id| pending(id, 10)).collect();
+        mode.on_event(Event::NewTracks(tracks), engine, printer);
+    }
+
+    fn analysis_pill(mode: &LibraryMode) -> Option<JobView> {
+        mode.jobs(Instant::now()).into_iter().next()
+    }
+
+    #[test]
+    fn playing_a_deck_never_resumes_a_paused_analysis() {
+        let (_dir, mut mode, mut engine, printer) = mode();
+        mode.job(JobKind::Analysis, JobOp::Pause);
+        new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
+        mode.set_playing(true);
+        mode.set_playing(false);
+        let analyzer = mode.analyzer.as_ref().unwrap();
+        assert!(analyzer.paused());
+        assert_eq!(analyzer.max_active(), usize::MAX);
+        let pill = analysis_pill(&mode).unwrap();
+        assert_eq!(
+            (pill.state, pill.done, pill.total),
+            (ui::JobState::Paused, Some(0), Some(3))
+        );
+        mode.job(JobKind::Analysis, JobOp::Resume);
+        assert!(!mode.analyzer.as_ref().unwrap().paused());
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn stop_clears_the_queue_and_a_rescan_queues_what_is_left() {
+        let (_dir, mut mode, mut engine, printer) = mode();
+        mode.job(JobKind::Analysis, JobOp::Pause);
+        new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
+        assert!(analysis_pill(&mode).is_some());
+        mode.job(JobKind::Analysis, JobOp::Stop);
+        assert!(mode.jobs(Instant::now()).is_empty(), "the pill goes");
+        assert_eq!(mode.analyzer.as_ref().unwrap().progress().queued, 0);
+        assert_eq!((mode.enqueued.len(), mode.queued_total), (0, 0));
+        // A rescan finds the same tracks still out of date: they are queued again.
+        mode.job(JobKind::Analysis, JobOp::Pause);
+        new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
+        let pill = analysis_pill(&mode).unwrap();
+        assert_eq!((pill.done, pill.total), (Some(0), Some(3)));
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn a_pause_is_forgotten_at_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("library.sqlite3");
+        let printer = Printer::spawn();
+        let (mut engine, _renderer) = engine::engine(engine::EngineConfig {
+            sample_rate: 44_100,
+            max_block_frames: 512,
+        });
+        let mut first = LibraryMode::start_with(Some(&db), None).unwrap();
+        first.job(JobKind::Analysis, JobOp::Pause);
+        assert!(first.analyzer.as_ref().unwrap().paused());
+        first.shutdown(&mut engine, &printer);
+        let second = LibraryMode::start_with(Some(&db), None).unwrap();
+        assert!(!second.analyzer.as_ref().unwrap().paused());
+        second.shutdown(&mut engine, &printer);
         printer.finish();
     }
 

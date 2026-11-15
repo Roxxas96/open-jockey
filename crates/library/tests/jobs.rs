@@ -726,3 +726,99 @@ fn an_analysis_of_a_file_that_changed_since_it_was_read_is_stored_out_of_date() 
     store(FileStamp { size, mtime });
     assert_eq!(stored().0, i64::from(ANALYZER_VERSION));
 }
+
+fn four_tracks(s: &Setup) -> Vec<i64> {
+    (0..4)
+        .map(|i| add_track(s, &format!("{i}.wav"), 120.0 + f64::from(i), 0.1))
+        .collect()
+}
+
+#[test]
+fn a_paused_analyzer_starts_nothing_and_the_throttle_never_resumes_it() {
+    let s = setup();
+    let ids = four_tracks(&s);
+    let analyzer = Analyzer::start(&s.lib, 3).unwrap();
+    assert!(!analyzer.paused());
+    analyzer.set_paused(true);
+    analyzer.enqueue(&ids, false);
+    // A deck starts and stops playing: only the throttle changes.
+    analyzer.set_max_active(1);
+    analyzer.set_max_active(usize::MAX);
+    assert!(analyzer.paused());
+    std::thread::sleep(Duration::from_millis(300));
+    let p = analyzer.progress();
+    assert_eq!((p.active, p.done, p.queued), (0, 0, 4), "{p:?}");
+
+    // Resumed: the rest finishes, each track once.
+    analyzer.set_paused(false);
+    let p = wait(&analyzer);
+    assert_eq!((p.done, p.skipped, p.failed_count), (4, 0, 0), "{p:?}");
+}
+
+#[test]
+fn clear_queue_drops_what_waits_and_returns_it() {
+    let s = setup();
+    let ids = four_tracks(&s);
+    let analyzer = Analyzer::start(&s.lib, 2).unwrap();
+    analyzer.set_paused(true);
+    analyzer.enqueue(&ids, false);
+    let mut dropped = analyzer.clear_queue();
+    dropped.sort_unstable();
+    assert_eq!(dropped, ids);
+    assert_eq!(analyzer.progress().queued, 0);
+    // Nothing runs after resuming, and a later enqueue works again.
+    analyzer.set_paused(false);
+    analyzer.enqueue(&ids[..1], false);
+    let p = wait(&analyzer);
+    assert_eq!(p.done, 1, "{p:?}");
+}
+
+#[test]
+fn resume_carries_on_without_redoing_finished_tracks() {
+    let s = setup();
+    let ids = four_tracks(&s);
+    let analyzer = Analyzer::start(&s.lib, 1).unwrap();
+    analyzer.enqueue(&ids, false);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while analyzer.progress().done == 0 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    analyzer.set_paused(true);
+    // The track in flight finishes; then nothing moves.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while analyzer.progress().active > 0 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let held = analyzer.progress();
+    std::thread::sleep(Duration::from_millis(200));
+    let still = analyzer.progress();
+    assert_eq!((held.done, held.queued), (still.done, still.queued));
+    assert!(held.queued > 0, "{held:?}");
+    analyzer.set_paused(false);
+    let p = wait(&analyzer);
+    // Four tracks, each analyzed exactly once.
+    assert_eq!((p.done, p.skipped), (4, 0), "{p:?}");
+}
+
+#[test]
+fn current_names_the_track_being_analyzed() {
+    let s = setup();
+    let ids = four_tracks(&s);
+    let analyzer = Analyzer::start(&s.lib, 1).unwrap();
+    assert_eq!(analyzer.current(), None);
+    analyzer.enqueue(&ids, false);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut seen = None;
+    while seen.is_none() && analyzer.progress().queued > 0 {
+        assert!(Instant::now() < deadline);
+        seen = analyzer.current();
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    let name = seen.expect("a track name while analysis ran");
+    // The files have no tags: the scan titles them by file name.
+    assert!(["0", "1", "2", "3"].contains(&name.as_str()), "{name}");
+    wait(&analyzer);
+    assert_eq!(analyzer.current(), None);
+}
