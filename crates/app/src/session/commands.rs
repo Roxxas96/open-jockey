@@ -79,8 +79,13 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
                     library_step(step, parts, engine, library);
                 }
             }
-            // The footer's pause, resume and stop: Task 2 routes them to the jobs.
-            UiCommand::Job { .. } => {}
+            // The footer's pause, resume and stop. Jobs the session owns are routed here
+            // too as they arrive.
+            UiCommand::Job { kind, op } => {
+                if let Some((_, _, Some(library))) = control.as_mut() {
+                    library.job(kind, op);
+                }
+            }
         }
     }
     for text in parts

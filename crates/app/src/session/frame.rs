@@ -15,6 +15,7 @@ use crate::printer::Line;
 use super::detail::DetailJobs;
 use super::export::Export;
 use super::import::Import;
+use super::jobs;
 use super::settings::Settings;
 use super::view::ViewStore;
 
@@ -252,7 +253,9 @@ impl FrameParts {
                     .unwrap_or_default(),
             })
         });
+        let jobs = jobs::gather(pass.library, Instant::now());
         ControlFrame {
+            jobs,
             control: pass.state.clone(),
             ghosts: pass.ghosts,
             global_ghosts: pass.global_ghosts,

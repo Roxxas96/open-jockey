@@ -123,6 +123,11 @@ struct State {
     running: usize,
     /// At most this many jobs run at once (see [`Analyzer::set_max_active`]).
     max_active: usize,
+    /// The user paused analysis: nothing new starts, whatever `max_active` says (see
+    /// [`Analyzer::set_paused`]).
+    paused: bool,
+    /// Per track being analyzed, its id and name, for [`Analyzer::current`].
+    current: Vec<(i64, String)>,
     done: usize,
     skipped: usize,
 }
@@ -271,6 +276,35 @@ impl Analyzer {
         self.shared.wake.notify_all();
     }
 
+    /// Pauses or resumes analysis on the user's behalf. A paused analysis starts nothing
+    /// new (tracks being analyzed finish) whatever [`Analyzer::set_max_active`] says, so
+    /// throttling for a playing deck never resumes it. The queue is kept.
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.state().paused = paused;
+        self.shared.wake.notify_all();
+    }
+
+    /// Whether the user paused analysis (see [`Analyzer::set_paused`]).
+    #[must_use]
+    pub fn paused(&self) -> bool {
+        self.shared.state().paused
+    }
+
+    /// Drops the tracks waiting, keeping the ones being analyzed, and returns the ids
+    /// dropped (so a caller can queue them again later).
+    pub fn clear_queue(&self) -> Vec<i64> {
+        let mut state = self.shared.state();
+        state.force.clear();
+        state.queue.drain(..).collect()
+    }
+
+    /// The name of a track being analyzed right now ("Artist – Title", or its file name),
+    /// if any: the oldest one when several run.
+    #[must_use]
+    pub fn current(&self) -> Option<String> {
+        self.shared.state().current.first().map(|(_, n)| n.clone())
+    }
+
     /// The limit set by [`Analyzer::set_max_active`] (`usize::MAX` when none was set).
     #[must_use]
     pub fn max_active(&self) -> usize {
@@ -371,6 +405,7 @@ fn worker(shared: &Shared) {
             }
         }
         let mut state = shared.state();
+        state.current.retain(|(c, _)| *c != id);
         // This worker takes the next job itself, so lowering `running` wakes no one.
         state.running -= 1;
         match outcome {
@@ -388,8 +423,8 @@ fn next_job(shared: &Shared) -> Option<(i64, bool)> {
         if shared.stopped() {
             return None;
         }
-        if state.running >= state.max_active {
-            // Over the limit: wait for it to rise (or for the stop).
+        if state.paused || state.running >= state.max_active {
+            // Paused or over the limit: wait for it to lift (or for the stop).
         } else if let Some(id) = state.queue.pop_front() {
             let force = state.force.remove(&id).unwrap_or(false);
             state.running += 1;
@@ -405,6 +440,8 @@ fn next_job(shared: &Shared) -> Option<(i64, bool)> {
 /// What the database says about a track before analyzing it.
 struct TrackInfo {
     path: String,
+    title: Option<String>,
+    artist: Option<String>,
     missing: bool,
     fingerprint: Vec<u8>,
     file: FileStamp,
@@ -419,12 +456,15 @@ fn track_info(reader: &Reader, id: i64) -> Result<Option<TrackInfo>, LibraryErro
         .connection()
         .prepare_cached(
             "SELECT t.path, t.missing, t.fingerprint, a.analyzer_version, \
-                    coalesce(a.grid_locked, 0), a.bpm, a.first_beat_frames, t.size, t.mtime \
+                    coalesce(a.grid_locked, 0), a.bpm, a.first_beat_frames, t.size, t.mtime, \
+                    t.title, t.artist \
              FROM tracks t LEFT JOIN analysis a ON a.track_id = t.id WHERE t.id = ?1",
         )?
         .query_row([id], |r| {
             Ok(TrackInfo {
                 path: r.get(0)?,
+                title: r.get(9)?,
+                artist: r.get(10)?,
                 missing: r.get(1)?,
                 fingerprint: r.get(2)?,
                 file: FileStamp {
@@ -459,6 +499,7 @@ fn run_job(
             return Outcome::Failed(e.to_string());
         }
     };
+    shared.state().current.push((id, display_name(&info)));
     // Up to date: nothing to do, even if the file has since gone missing.
     if !force && info.analyzer_version == Some(i64::from(ANALYZER_VERSION)) {
         return Outcome::Skipped;
@@ -519,6 +560,19 @@ fn run_job(
             }
             Outcome::Failed(e.to_string())
         }
+    }
+}
+
+/// "Artist – Title", the title alone, or the file's name.
+fn display_name(info: &TrackInfo) -> String {
+    let title = info.title.as_deref().filter(|t| !t.is_empty());
+    let artist = info.artist.as_deref().filter(|a| !a.is_empty());
+    match (artist, title) {
+        (Some(a), Some(t)) => format!("{a} – {t}"),
+        (None, Some(t)) => t.to_owned(),
+        _ => Path::new(&info.path)
+            .file_name()
+            .map_or_else(|| info.path.clone(), |n| n.to_string_lossy().into_owned()),
     }
 }
 

@@ -8,6 +8,7 @@ mod detail;
 mod export;
 mod frame;
 mod import;
+pub(crate) mod jobs;
 mod settings;
 mod view;
 
