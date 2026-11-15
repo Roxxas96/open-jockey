@@ -79,6 +79,7 @@ fn view() -> BrowserView {
         ],
         list_offset: 0,
         list_count: 2,
+        list_seconds: None,
         all_selected: false,
         list_cursor: 0,
         search: None,
@@ -118,7 +119,6 @@ fn browser_shows_tree_and_rows() {
     // The title, the remix and the info panel's copy of each.
     assert_eq!(harness.get_all_by_label("Just Us").count(), 2);
     assert_eq!(harness.get_all_by_label("Extended Mix").count(), 2);
-    harness.get_by_label("2 files");
     assert_eq!(harness.get_all_by_label("5:29").count(), 2);
     harness.get_by_label("missing");
     assert_eq!(harness.get_all_by_label("126.0").count(), 3);
@@ -2030,27 +2030,7 @@ fn cmd_a_selects_the_whole_list() {
     harness.run_steps(2);
     assert_eq!(harness.state().steps, [browse(BrowserEdit::SelectAll)]);
     assert!(ui::browser::selected_rows(&harness.ctx).is_empty());
-    assert!(
-        !painted_text(&harness.state().view)
-            .iter()
-            .any(|t| t.contains("selected"))
-    );
-    // The library answers with the flag and the count shows it: no id set was built.
-    harness.state_mut().view.all_selected = true;
-    harness.run_steps(2);
-    assert!(
-        painted_text(&harness.state().view)
-            .iter()
-            .any(|t| t == "5000 selected")
-    );
-    // A pick, which is what the library clears the flag on, brings the file count back.
-    harness.state_mut().view.all_selected = false;
-    harness.run_steps(2);
-    assert!(
-        painted_text(&harness.state().view)
-            .iter()
-            .any(|t| t == "5000 files")
-    );
+    // The library answers with the flag; the footer shows the count (tests/footer.rs).
 }
 
 #[test]

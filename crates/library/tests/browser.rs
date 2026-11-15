@@ -1472,3 +1472,38 @@ fn tracks_under_a_folder_are_found_not_its_namesakes() {
     assert_eq!(under("/m/Old.mp3"), [ids[3]]);
     assert!(under("/m/Ol").is_empty());
 }
+
+#[test]
+fn list_seconds_sums_the_list() {
+    let (_dir, lib) = open();
+    let ids = add_tracks(
+        &lib,
+        &[
+            ("/m/1.flac".to_owned(), "One".to_owned()),
+            ("/m/2.flac".to_owned(), "Two".to_owned()),
+            ("/m/3.flac".to_owned(), "Unknown length".to_owned()),
+        ],
+    );
+    // 100 s and 200 s at 44.1 kHz; the third has no length.
+    let stmts = [(ids[0], 4_410_000_i64), (ids[1], 8_820_000)]
+        .into_iter()
+        .map(|(id, frames)| RawStatement {
+            sql: "UPDATE tracks SET duration_frames = ?2, sample_rate = 44100 WHERE id = ?1".into(),
+            params: vec![Value::Integer(id), Value::Integer(frames)],
+        })
+        .collect();
+    lib.writer().submit_wait(WriteOp::Raw(stmts)).unwrap();
+    create_playlist(&lib, "Mix", &ids);
+    let mut b = browser(&lib, Vec::new());
+    let view = b.edit(BrowserEdit::SelectTree(1)).unwrap();
+    assert_eq!(view.path, "Playlists ▸ Mix");
+    assert_eq!(view.list_seconds, Some(300.0));
+    // A search sums only the rows it keeps.
+    let view = search(&mut b, Some("two"), 1);
+    assert_eq!(view.list_seconds, Some(200.0));
+    // A folder counts files, not seconds.
+    let (_disk, root) = disk();
+    let mut b = browser(&lib, vec![drive("D", &root)]);
+    let view = b.edit(BrowserEdit::SelectTree(0)).unwrap();
+    assert_eq!((view.playlist, view.list_seconds), (None, None));
+}

@@ -5,6 +5,7 @@
 use engine::{DeckId, EffectKind, HotcueSlot};
 use library::BrowserEdit;
 
+use crate::model::{JobKind, JobOp};
 use crate::view::{
     ColourScheme, JogDisplay, Layout, PanelSizes, WaveformPalette, WaveformPosition, WaveformStyle,
 };
@@ -36,6 +37,8 @@ pub enum UiCommand {
     Export(ExportStep),
     /// A change to the library, which the session makes through library mode.
     Library(LibraryStep),
+    /// Pauses, resumes or stops a background job.
+    Job { kind: JobKind, op: JobOp },
 }
 
 /// What the window asks of the library.

@@ -1,10 +1,8 @@
-//! The top bar: the status line (or the error that stopped the session) on the left; the master meter, the CPU load, the clock and
+//! The top bar: the menu and the settings button on the left; the master meter, the CPU load, the clock and
 //! the controller and audio state on the right.
 
-use std::sync::mpsc::Sender;
-use std::time::Instant;
-
 use egui::{CornerRadius, Rect, RichText, Sense, Ui, Vec2, pos2};
+use std::sync::mpsc::Sender;
 
 use crate::command::UiCommand;
 use crate::deck::DeckReads;
@@ -32,7 +30,6 @@ pub fn show(
             *settings_open = !*settings_open;
         }
         ui.separator();
-        // The right-hand labels first; the status takes what they leave, cut short.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             match &frame.audio {
                 Ok(device) => ui.label(device.as_str()),
@@ -50,17 +47,6 @@ pub fn show(
             ui.separator();
             let peaks = reads.meters.map_or([0.0; 2], |m| m.master_peak);
             master_meter(ui, peaks);
-            ui.separator();
-            let status = match &frame.error {
-                Some(error) => RichText::new(error.as_str()).color(p.error).strong(),
-                None => {
-                    let own = crate::browser::notice(ui.ctx());
-                    RichText::new(frame.status_line_with(Instant::now(), own))
-                }
-            };
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(egui::Label::new(status).truncate());
-            });
         });
     });
 }

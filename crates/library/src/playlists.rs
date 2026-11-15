@@ -331,6 +331,26 @@ impl Reader {
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
+    /// The total length in seconds of playlist `id`'s entries that match `text` (all of them
+    /// when `None`); a track of unknown length adds nothing.
+    pub(crate) fn playlist_seconds(
+        &self,
+        id: i64,
+        text: Option<&str>,
+    ) -> Result<f64, LibraryError> {
+        let mut params = vec![Value::Integer(id)];
+        let matching = text_condition(text, &mut params);
+        let sql = format!(
+            "SELECT total(CAST(t.duration_frames AS REAL) / nullif(t.sample_rate, 0)) \
+             FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id \
+             WHERE pt.playlist_id = ?{matching}"
+        );
+        Ok(self
+            .connection()
+            .prepare_cached(&sql)?
+            .query_row(params_from_iter(&params), |r| r.get(0))?)
+    }
+
     /// The files of the library tracks matching `filter`, ordered by `sort` as the browser
     /// shows them (by title, an untitled track by its file name), ties by path.
     ///

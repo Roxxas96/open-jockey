@@ -1801,6 +1801,7 @@ mod tests {
             list: Vec::new(),
             list_offset: 0,
             list_count: 0,
+            list_seconds: None,
             all_selected: false,
             list_cursor: 0,
             search: None,

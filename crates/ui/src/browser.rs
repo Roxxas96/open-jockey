@@ -1144,19 +1144,8 @@ fn list_pane(
     // The library separates the path with "▸" (U+25B8), which egui's bundled fonts lack and
     // the system fallbacks may too.
     let path = view.path.replace('▸', ">");
-    let files = if view.list_count == 1 {
-        "file"
-    } else {
-        "files"
-    };
-    let count = if view.all_selected {
-        format!("{} selected", view.list_count)
-    } else {
-        format!("{} {files}", view.list_count)
-    };
-    let count_width = 90.0;
     let search_width = SEARCH_WIDTH.min(header.width() * 0.35);
-    let search_x = header.max.x - count_width - 6.0 - search_width;
+    let search_x = header.max.x - search_width;
     cell(
         ui,
         header,
@@ -1194,13 +1183,6 @@ fn list_pane(
         query.text.clear();
         steps.push(query.search());
     }
-    cell(
-        ui,
-        header,
-        header.max.x - count_width,
-        count_width,
-        RichText::new(count).color(p.text_dim),
-    );
     // The column headers, over the same cells as the rows.
     let head = row(ui, None);
     let cells = columns(head.min.x, head.width());
@@ -1627,6 +1609,7 @@ mod tests {
             list: vec![row; 200],
             list_offset: offset,
             list_count: 5000,
+            list_seconds: None,
             all_selected: false,
             list_cursor: cursor,
             search: None,

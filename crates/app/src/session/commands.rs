@@ -79,6 +79,8 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
                     library_step(step, parts, engine, library);
                 }
             }
+            // The footer's pause, resume and stop: Task 2 routes them to the jobs.
+            UiCommand::Job { .. } => {}
         }
     }
     for text in parts

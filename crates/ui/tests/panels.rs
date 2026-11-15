@@ -40,6 +40,7 @@ fn browser() -> BrowserView {
         }],
         list_offset: 0,
         list_count: 1,
+        list_seconds: None,
         all_selected: false,
         list_cursor: 0,
         search: None,
@@ -159,9 +160,9 @@ fn dragging_a_divider_sends_the_new_sizes() {
         ..ui::Screen::default()
     };
     let mut harness = draw(&frame, &mut screen);
-    // The divider between the tree and the list, near the bottom of the window.
-    let from = egui::pos2(0.20 * 1440.0, 880.0);
-    drag(&mut harness, from, egui::pos2(0.30 * 1440.0, 880.0));
+    // The divider between the tree and the list, near the bottom of the window, above the footer.
+    let from = egui::pos2(0.20 * 1440.0, 860.0);
+    drag(&mut harness, from, egui::pos2(0.30 * 1440.0, 860.0));
     let sent: Vec<_> = asked.try_iter().collect();
     let Some(UiCommand::View(ViewChange::SetSizes(sizes))) = sent.last() else {
         panic!("no sizes sent: {sent:?}");
@@ -192,12 +193,16 @@ fn spare_height_goes_to_the_browser() {
     harness.run_steps(3);
     let top_bar = harness.get_by_label("top bar").rect();
     let browser = harness.get_by_label("browser").rect();
+    let footer = harness.get_by_label("footer").rect();
     // The window is what the harness gives the root, inside its margin.
-    let window = egui::vec2(browser.width(), browser.max.y - top_bar.min.y);
+    let window = egui::vec2(browser.width(), footer.max.y - top_bar.min.y);
     let sections = ui::layout::shown_sections(&frame.view);
     let sizes = ui::layout::drawn_sizes(frame.view.sizes, &sections, window);
-    let rest =
-        window.y - top_bar.height() - sizes.lanes * window.y - ui::deck::row_height(&sections);
+    let rest = window.y
+        - top_bar.height()
+        - footer.height()
+        - sizes.lanes * window.y
+        - ui::deck::row_height(&sections);
     let height = browser.height();
     assert!(
         (height - rest).abs() <= 2.0,
