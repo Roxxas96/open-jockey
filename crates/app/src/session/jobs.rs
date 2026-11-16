@@ -4,6 +4,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use std::path::PathBuf;
+
 use ui::{JobKind, JobState, JobView};
 
 /// How far back [`Pace`] looks to measure a job's rate.
@@ -85,15 +87,17 @@ impl Pace {
     }
 }
 
-/// The jobs the frame lists, ordered by kind: library mode's, the cover lookup's, then
-/// the session's own (none yet).
+/// The jobs the frame lists, ordered by kind: library mode's (analysis, scan, stems), the
+/// cover lookup's, then the session's own (the import).
 pub(super) fn gather(
     library: Option<&crate::library_mode::LibraryMode>,
     covers: Option<&crate::covers::CoverWorker>,
+    import: Option<&super::import::Import>,
     now: Instant,
 ) -> Vec<JobView> {
     let mut jobs = library.map(|l| l.jobs(now)).unwrap_or_default();
     jobs.extend(covers.and_then(|c| c.job(now)));
+    jobs.extend(import.and_then(super::import::Import::job));
     jobs.sort_by_key(|job| job.kind);
     jobs
 }
@@ -175,6 +179,75 @@ pub(crate) fn covers_job(facts: CoverFacts) -> JobView {
         can_stop: true,
         locked: None,
     }
+}
+
+/// The pill of a scan in progress: no total and no time left, since a scan does not know
+/// how many files it will find. It cannot be paused or stopped: it is short, and what it
+/// finds is wanted. Named for the folder when one is watched.
+pub(crate) fn scan_job(roots: &[PathBuf]) -> JobView {
+    let name = match roots {
+        [root] => root
+            .file_name()
+            .map(|n| crate::format::safe(n.to_string_lossy())),
+        _ => None,
+    };
+    JobView {
+        kind: JobKind::Scan,
+        label: match name {
+            Some(name) => format!("Scanning {name}…"),
+            None => "Scanning the library…".to_owned(),
+        },
+        done: None,
+        total: None,
+        eta: None,
+        state: JobState::Running,
+        current: None,
+        note: None,
+        can_pause: false,
+        can_stop: false,
+        locked: None,
+    }
+}
+
+/// What the stems pill needs to know.
+pub(crate) struct StemsFacts {
+    /// Separations finished and in all, in the current queue.
+    pub done: usize,
+    pub total: usize,
+    /// The user paused the queue.
+    pub paused: bool,
+    /// A separation is running.
+    pub separating: bool,
+    /// The track being separated, if one is.
+    pub current: Option<String>,
+    /// The time left, once [`Pace`] can tell.
+    pub eta: Option<Duration>,
+}
+
+/// The one pill for the whole stems queue, or `None` when it is empty. A pause lets the
+/// track in flight finish first, so it reads "pausing" until then.
+pub(crate) fn stems_job(facts: StemsFacts) -> Option<JobView> {
+    if facts.total == 0 {
+        return None;
+    }
+    let state = match (facts.paused, facts.separating) {
+        (false, _) => JobState::Running,
+        (true, true) => JobState::Pausing,
+        (true, false) => JobState::Paused,
+    };
+    Some(JobView {
+        kind: JobKind::Stems,
+        label: "Separating stems".to_owned(),
+        done: Some(facts.done.min(facts.total)),
+        total: Some(facts.total),
+        eta: if facts.paused { None } else { facts.eta },
+        state,
+        current: facts.current,
+        note: None,
+        can_pause: true,
+        can_stop: true,
+        locked: None,
+    })
 }
 
 #[cfg(test)]
@@ -333,5 +406,20 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_scan_shows_an_indeterminate_pill() {
+        let job = scan_job(&[PathBuf::from("music").join("House")]);
+        assert_eq!(job.kind, JobKind::Scan);
+        assert_eq!(job.label, "Scanning House…");
+        assert_eq!((job.done, job.total, job.eta), (None, None, None));
+        assert_eq!(job.state, JobState::Running);
+        assert!(!job.can_pause && !job.can_stop);
+        // Several folders, or none known: the library as a whole.
+        let many = scan_job(&[PathBuf::from("a"), PathBuf::from("b")]);
+        assert_eq!(many.label, "Scanning the library…");
+        assert_eq!(scan_job(&[]).label, "Scanning the library…");
+        assert_eq!(scan_job(&[PathBuf::new()]).label, "Scanning the library…");
     }
 }

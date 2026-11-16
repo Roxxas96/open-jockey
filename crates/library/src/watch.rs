@@ -57,6 +57,9 @@ pub struct Watcher {
     thread: Option<JoinHandle<()>>,
     errors: Receiver<LibraryError>,
     scans: Arc<AtomicU64>,
+    /// A scan is running right now.
+    scanning: Arc<AtomicBool>,
+    roots: Vec<PathBuf>,
     stop: Arc<AtomicBool>,
     health: Arc<Mutex<WatchHealth>>,
     skips: Arc<Mutex<Skips>>,
@@ -99,6 +102,18 @@ impl Watcher {
     #[must_use]
     pub fn scan_count(&self) -> u64 {
         self.scans.load(Ordering::Relaxed)
+    }
+
+    /// Whether a scan is running right now (a changed file, or a whole root).
+    #[must_use]
+    pub fn is_scanning(&self) -> bool {
+        self.scanning.load(Ordering::Relaxed)
+    }
+
+    /// The folders being watched.
+    #[must_use]
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
     }
 
     /// Delivers `event` as if the OS watcher had.
@@ -188,6 +203,8 @@ fn start(
     let scans = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let skips = Arc::new(Mutex::new(Skips::default()));
+    let scanning = Arc::new(AtomicBool::new(false));
+    let watched = roots.clone();
     let worker = Worker {
         writer: lib.writer(),
         reader,
@@ -196,6 +213,7 @@ fn start(
         rescan_every,
         errors: error_tx,
         scans: Arc::clone(&scans),
+        scanning: Arc::clone(&scanning),
         stop: Arc::clone(&stop),
         health: Arc::clone(&health),
         skips: Arc::clone(&skips),
@@ -208,6 +226,8 @@ fn start(
         thread: Some(thread),
         errors,
         scans,
+        scanning,
+        roots: watched,
         stop,
         health,
         skips,
@@ -234,6 +254,7 @@ struct Worker {
     rescan_every: Duration,
     errors: Sender<LibraryError>,
     scans: Arc<AtomicU64>,
+    scanning: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     health: Arc<Mutex<WatchHealth>>,
     skips: Arc<Mutex<Skips>>,
@@ -366,6 +387,7 @@ impl Worker {
             return true;
         }
         self.scans.fetch_add(1, Ordering::Relaxed);
+        self.scanning.store(true, Ordering::Relaxed);
         let result = scan_path(
             &self.writer,
             self.reader.connection(),
@@ -374,11 +396,13 @@ impl Worker {
             dirs,
             Some(&self.stop),
         );
+        self.scanning.store(false, Ordering::Relaxed);
         self.finish(path, result)
     }
 
     /// Scans a whole root. False when the library has shut down.
     fn rescan(&self, root: &Path) -> bool {
+        self.scanning.store(true, Ordering::Relaxed);
         let result = scan_folder_with(
             &self.writer,
             self.reader.connection(),
@@ -388,6 +412,7 @@ impl Worker {
             None,
             &mut |_| {},
         );
+        self.scanning.store(false, Ordering::Relaxed);
         self.finish(root, result)
     }
 

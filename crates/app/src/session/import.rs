@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use interop::{ImportPlan, ImportReport, TrackImport};
 use library::Library;
-use ui::{ImportStep, ImportSummary, ImportView, TrackLabel};
+use ui::{ImportStep, ImportSummary, ImportView, JobKind, JobState, JobView, TrackLabel};
 
 use crate::format::{safe, track_name};
 use crate::vdj::{Places, Scan};
@@ -124,6 +124,42 @@ impl Import {
                 }
                 self.next(decks_loaded);
             }
+        }
+    }
+
+    /// The footer's pill while the import reads VirtualDJ or writes: it can be stopped
+    /// only before the write starts, and no pill shows while it waits for an answer.
+    pub fn job(&self) -> Option<JobView> {
+        let (label, can_stop, locked) = match self.state {
+            State::Scanning(_) => ("Reading VirtualDJ…", true, None),
+            State::Applying(_) => (
+                "Writing playlists…",
+                false,
+                Some("The import is writing; it can't be stopped now."),
+            ),
+            State::Rest | State::Planned(_) => return None,
+        };
+        Some(JobView {
+            kind: JobKind::Import,
+            label: label.to_owned(),
+            done: None,
+            total: None,
+            eta: None,
+            state: JobState::Running,
+            current: None,
+            note: None,
+            can_pause: false,
+            can_stop,
+            locked,
+        })
+    }
+
+    /// The footer's stop: before the write it cancels the import with nothing written
+    /// (the thread's plan is dropped); once it writes, it is ignored. The import does
+    /// not come back on its own.
+    pub fn stop(&mut self) {
+        if matches!(self.state, State::Scanning(_)) {
+            self.step(ImportStep::Cancel, false);
         }
     }
 
@@ -329,7 +365,7 @@ mod tests {
     use controller::Runtime;
     use engine::{Command, DeckCommand, DeckId, EngineController, EngineRenderer};
     use library::{HotcuePoint, WriteOp};
-    use ui::{Resolution, UiCommand};
+    use ui::{JobKind, JobOp, Resolution, UiCommand};
 
     use super::super::commands;
     use super::super::frame::FrameParts;
@@ -637,6 +673,64 @@ mod tests {
         });
         assert_eq!(s.settled(), ImportView::Idle);
         s.nothing_written();
+    }
+
+    fn stop_import(s: &mut Setup) {
+        s.window
+            .send(UiCommand::Job {
+                kind: JobKind::Import,
+                op: JobOp::Stop,
+            })
+            .unwrap();
+        commands::drain(&s.commands, &mut s.parts, None);
+    }
+
+    fn import_pill(s: &Setup) -> Option<JobView> {
+        s.parts.import.as_ref().and_then(Import::job)
+    }
+
+    #[test]
+    fn the_import_can_be_stopped_before_it_writes_and_nothing_changes() {
+        let mut s = setup();
+        hotcues_here(&s);
+        assert_eq!(s.send(ImportStep::Scan), ImportView::Scanning);
+        let pill = import_pill(&s).expect("a pill while reading");
+        assert_eq!(pill.kind, JobKind::Import);
+        assert_eq!(pill.label, "Reading VirtualDJ…");
+        assert_eq!((pill.done, pill.total, pill.eta), (None, None, None));
+        assert!(pill.can_stop && !pill.can_pause && pill.locked.is_none());
+        stop_import(&mut s);
+        assert!(import_pill(&s).is_none());
+        assert_eq!(s.view(), ImportView::Idle);
+        // The thread's plan, finished or not, comes to nothing.
+        std::thread::sleep(Duration::from_millis(200));
+        commands::drain(&s.commands, &mut s.parts, None);
+        assert_eq!(s.view(), ImportView::Idle, "it does not come back");
+        assert!(import_pill(&s).is_none());
+        s.nothing_written();
+    }
+
+    #[test]
+    fn the_import_cannot_be_stopped_while_writing() {
+        let mut s = setup();
+        assert_eq!(s.send(ImportStep::Scan), ImportView::Scanning);
+        assert!(matches!(s.settled(), ImportView::Summary(_)));
+        assert_eq!(s.send(ImportStep::Apply), ImportView::Applying);
+        let pill = import_pill(&s).expect("a pill while writing");
+        assert_eq!(pill.label, "Writing playlists…");
+        assert!(!pill.can_stop && !pill.can_pause);
+        assert_eq!(
+            pill.locked,
+            Some("The import is writing; it can't be stopped now.")
+        );
+        stop_import(&mut s);
+        assert!(
+            matches!(s.settled(), ImportView::Done(_)),
+            "the stop was ignored and the import finished whole"
+        );
+        assert_eq!(s.lib.reader().unwrap().playlists().unwrap().len(), 1);
+        assert!(s.changed.load(Ordering::Relaxed));
+        assert!(import_pill(&s).is_none());
     }
 
     fn render(renderer: &mut EngineRenderer) {

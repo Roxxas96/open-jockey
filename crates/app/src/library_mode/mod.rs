@@ -38,7 +38,7 @@ use library::{
 use crate::console::ConsoleCommand;
 use crate::format::{bpm_text, grid_text, key_text, notation_from_setting, safe, track_name};
 use crate::printer::Printer;
-use crate::session::jobs::{AnalysisFacts, Pace, analysis_job};
+use crate::session::jobs::{AnalysisFacts, Pace, StemsFacts, analysis_job, scan_job, stems_job};
 pub use delete::{SystemTrash, Trash};
 use memory_sync::{MemoryAction, MemorySync, engine_grid};
 use stem_jobs::{Reply, StemsControl, StemsSetup};
@@ -142,6 +142,8 @@ pub struct LibraryMode {
     worker: Option<JoinHandle<()>>,
     /// Stems, when enabled.
     stems: Option<StemsControl>,
+    /// The time left of the stems queue.
+    stems_pace: Pace,
     decks: [Option<DeckTrack>; 4],
     /// The track each deck held before its latest `Load`, still saved until the engine
     /// applies the load that replaced it: until the deck's `load_seq` passes the second
@@ -284,6 +286,7 @@ impl LibraryMode {
             events,
             worker: Some(worker),
             stems,
+            stems_pace: Pace::new(),
             decks: [None, None, None, None],
             outgoing: [None, None, None, None],
             engine_loads: [0; 4],
@@ -1105,7 +1108,7 @@ impl LibraryMode {
     }
 
     /// The background jobs for the footer, ordered by kind: the analysis while tracks
-    /// wait or run.
+    /// wait or run, a scan in progress, and the stems queue.
     pub fn jobs(&self, now: Instant) -> Vec<JobView> {
         let mut jobs = Vec::new();
         if let Some(analyzer) = &self.analyzer {
@@ -1123,6 +1126,24 @@ impl LibraryMode {
                 paused: analyzer.paused(),
                 stopped: self.analysis_stopped,
                 current: analyzer.current(),
+                eta,
+            }));
+        }
+        if let Some(watcher) = self.watcher.as_ref().filter(|w| w.is_scanning()) {
+            jobs.push(scan_job(watcher.roots()));
+        }
+        if let Some(stems) = &self.stems {
+            let (done, total) = stems.queue_progress().unwrap_or_default();
+            let eta = self
+                .stems_pace
+                .eta(now)
+                .map(|left| Duration::from_secs(left.as_secs_f64().round() as u64));
+            jobs.extend(stems_job(StemsFacts {
+                done,
+                total,
+                paused: stems.paused(),
+                separating: stems.separating(),
+                current: stems.separating_name().map(str::to_owned),
                 eta,
             }));
         }
@@ -1147,6 +1168,20 @@ impl LibraryMode {
     /// waiting and forgets that they were queued, so a rescan or a relaunch queues them
     /// again; tracks in flight finish.
     pub fn job(&mut self, kind: JobKind, op: JobOp) {
+        if kind == JobKind::Stems {
+            if let Some(stems) = self.stems.as_mut() {
+                match op {
+                    JobOp::Pause => stems.pause(true),
+                    JobOp::Resume => stems.pause(false),
+                    JobOp::Stop => {
+                        stems.stop_all();
+                        self.stems_pace = Pace::new();
+                    }
+                }
+                self.dirty = true;
+            }
+            return;
+        }
         if kind != JobKind::Analysis {
             return;
         }
@@ -1242,6 +1277,17 @@ impl LibraryMode {
                 })
                 .collect();
             stems.update(playing, playheads, loaded, job_decks);
+        }
+        // The pace of the queue, for the pill's time left.
+        match self.stems.as_ref().and_then(StemsControl::queue_progress) {
+            Some((done, total)) => {
+                if self.stems.as_ref().is_some_and(StemsControl::paused) {
+                    self.stems_pace.pause();
+                } else {
+                    self.stems_pace.sample(Instant::now(), done, total);
+                }
+            }
+            None => self.stems_pace = Pace::new(),
         }
     }
 
@@ -2869,6 +2915,7 @@ mod tests {
 
     use stem_jobs::{Reply, SeparatorSource, StemSeparator, StemsSetup};
     use stems::Separator;
+    use ui::JobState;
 
     /// The synthetic separator, counting its runs.
     struct Counting {
@@ -2953,6 +3000,64 @@ mod tests {
             Ok(Box::new(Scripted {
                 calls: counter,
                 report,
+                entered: entered_tx,
+                release: release_rx,
+            }) as Box<dyn StemSeparator>)
+        }));
+        (source, calls, entered, release)
+    }
+
+    /// Separates when released, one release per run: says it `entered`, reports half done
+    /// every few milliseconds, and ends `Cancelled` as soon as its cancel flag is set.
+    struct Held {
+        calls: Arc<AtomicUsize>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl stems::Separator for Held {
+        fn separate(
+            &mut self,
+            track: &engine::TrackBuffer,
+            progress: &dyn Fn(f32),
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> Result<engine::StemSet, stems::SeparateError> {
+            self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let _ = self.entered.send(());
+            loop {
+                if cancel.load(AtomicOrdering::Relaxed) {
+                    return Err(stems::SeparateError::Cancelled);
+                }
+                progress(0.5);
+                match self.release.recv_timeout(Duration::from_millis(2)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            }
+            stems::SyntheticSeparator::new().separate(
+                track,
+                &|_| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        }
+    }
+
+    impl StemSeparator for Held {}
+
+    /// A [`Held`] separator, with its run counter, the `entered` signal and the release.
+    fn held() -> (
+        SeparatorSource,
+        Arc<AtomicUsize>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered) = channel();
+        let (release, release_rx) = channel();
+        let counter = Arc::clone(&calls);
+        let source = SeparatorSource::Open(Box::new(move || {
+            Ok(Box::new(Held {
+                calls: counter,
                 entered: entered_tx,
                 release: release_rx,
             }) as Box<dyn StemSeparator>)
@@ -3084,6 +3189,146 @@ mod tests {
 
     fn idle(mode: &LibraryMode) -> bool {
         mode.stems.as_ref().is_some_and(|s| s.idle())
+    }
+
+    fn stems_pill(mode: &LibraryMode) -> Option<JobView> {
+        mode.jobs(Instant::now())
+            .into_iter()
+            .find(|j| j.kind == JobKind::Stems)
+    }
+
+    fn progress(mode: &LibraryMode) -> Option<(usize, usize)> {
+        mode.stems.as_ref().and_then(StemsControl::queue_progress)
+    }
+
+    /// Tracks 7 and 8 on decks 1 and 2, the first one separating (held) and the second
+    /// waiting behind it.
+    #[allow(clippy::type_complexity)]
+    fn two_in_the_queue() -> (
+        tempfile::TempDir,
+        LibraryMode,
+        EngineController,
+        engine::EngineRenderer,
+        Printer,
+        Arc<AtomicUsize>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (source, calls, entered, release) = held();
+        let (dir, mut mode, mut engine, mut renderer, printer, _events) =
+            stems_mode(Some(setup(source)), |_| {});
+        load_track(&mut mode, 0, 7, short_track(), &mut engine, &printer);
+        load_track(&mut mode, 1, 8, short_track(), &mut engine, &printer);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            progress(m) == Some((0, 2))
+        });
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |_, _| {
+            entered.try_recv().is_ok()
+        });
+        (
+            dir, mode, engine, renderer, printer, calls, entered, release,
+        )
+    }
+
+    #[test]
+    fn the_stems_queue_is_one_pill() {
+        let (_dir, mut mode, mut engine, mut renderer, printer, _calls, _entered, release) =
+            two_in_the_queue();
+        let pills: Vec<_> = mode
+            .jobs(Instant::now())
+            .into_iter()
+            .filter(|j| j.kind == JobKind::Stems)
+            .collect();
+        assert_eq!(pills.len(), 1, "two tracks, one pill");
+        let pill = &pills[0];
+        assert_eq!(pill.label, "Separating stems");
+        assert_eq!((pill.done, pill.total), (Some(0), Some(2)));
+        assert!(pill.current.is_some(), "the track being separated");
+        assert_eq!(pill.state, JobState::Running);
+        assert!(pill.can_pause && pill.can_stop && pill.locked.is_none());
+        // The first finishes: 1 of 2.
+        release.send(()).unwrap();
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            progress(m).is_some_and(|(done, _)| done == 1)
+        });
+        assert_eq!(stems_pill(&mode).unwrap().done, Some(1));
+        // The second finishes: the queue is over and the pill goes.
+        release.send(()).unwrap();
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            idle(m)
+        });
+        assert!(stems_pill(&mode).is_none());
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn stopping_stems_cancels_the_queue_and_it_does_not_return() {
+        let (_dir, mut mode, mut engine, mut renderer, printer, calls, _entered, _release) =
+            two_in_the_queue();
+        mode.job(JobKind::Stems, JobOp::Stop);
+        assert!(stems_pill(&mode).is_none(), "no pill once stopped");
+        assert_eq!(progress(&mode), None);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            idle(m)
+        });
+        // Give the thread time to start the second track, were it to.
+        for _ in 0..50 {
+            render(&mut renderer);
+            mode.poll(Instant::now(), &mut engine, &printer);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            calls.load(AtomicOrdering::Relaxed),
+            1,
+            "the second never ran"
+        );
+        assert!(stems_pill(&mode).is_none(), "it does not come back");
+        assert!(!engine.deck(DeckId::new(0).unwrap()).stems);
+        assert!(!engine.deck(DeckId::new(1).unwrap()).stems);
+        assert_eq!(
+            stems_rows(&mode, 7),
+            0,
+            "a stopped separation keeps nothing"
+        );
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn pausing_stems_lets_the_track_in_flight_finish_and_starts_nothing_new() {
+        let (_dir, mut mode, mut engine, mut renderer, printer, calls, entered, release) =
+            two_in_the_queue();
+        mode.job(JobKind::Stems, JobOp::Pause);
+        assert_eq!(stems_pill(&mode).unwrap().state, JobState::Pausing);
+        release.send(()).unwrap();
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            progress(m).is_some_and(|(done, _)| done == 1)
+                && !m.stems.as_ref().unwrap().separating()
+        });
+        for _ in 0..50 {
+            render(&mut renderer);
+            mode.poll(Instant::now(), &mut engine, &printer);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            calls.load(AtomicOrdering::Relaxed),
+            1,
+            "nothing new started"
+        );
+        let pill = stems_pill(&mode).unwrap();
+        assert_eq!((pill.state, pill.eta), (JobState::Paused, None));
+        mode.job(JobKind::Stems, JobOp::Resume);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |_, _| {
+            entered.try_recv().is_ok()
+        });
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+        release.send(()).unwrap();
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            idle(m)
+        });
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
     }
 
     #[test]

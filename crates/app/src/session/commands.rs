@@ -93,6 +93,20 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
                     }
                 }
             }
+            UiCommand::Job {
+                kind: JobKind::Import,
+                op: JobOp::Stop,
+            } => {
+                if let Some(import) = parts.import.as_mut() {
+                    import.stop();
+                }
+            }
+            // The import is a single read and write: it has no pause. The scan has no
+            // ops either.
+            UiCommand::Job {
+                kind: JobKind::Import | JobKind::Scan,
+                ..
+            } => {}
             UiCommand::Job { kind, op } => {
                 if let Some((_, _, Some(library))) = control.as_mut() {
                     library.job(kind, op);
