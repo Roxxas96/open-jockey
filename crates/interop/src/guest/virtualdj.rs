@@ -1,9 +1,12 @@
 //! The VirtualDJ branch of a guest stick: `VirtualDJ/database.xml` and `VirtualDJ/MyLists`.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use super::{GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, track_from_tags};
+use super::{
+    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, on_stick as confined,
+    track_from_tags,
+};
 use crate::virtualdj::{VdjPoi, VdjSong, read_database, read_playlists};
 
 /// Slots of a guest hotcue; VirtualDJ's `Num` 1..=8 become slot 0..=7.
@@ -28,9 +31,22 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     if database.is_file() {
         match read_database(&database, Some(root)) {
             Ok(songs) => {
-                for song in songs.into_iter().filter(|s| s.path.is_file()) {
+                let mut outside = 0;
+                for song in songs {
+                    if confined(root, &song.path).is_none() {
+                        if song.path.is_file() {
+                            outside += 1;
+                        }
+                        continue;
+                    }
                     index.insert(song.path.clone(), source.tracks.len());
                     source.tracks.push(track(song));
+                }
+                if outside > 0 {
+                    problems.push(format!(
+                        "{outside} database {} outside this stick",
+                        if outside == 1 { "song is" } else { "songs are" }
+                    ));
                 }
             }
             Err(e) => problems.push(e.to_string()),
@@ -131,8 +147,8 @@ fn track(song: VdjSong) -> GuestTrack {
 /// Maps a playlist path written under another mount (`/Volumes/<name>/…`, `E:/…`) onto the
 /// stick: the longest tail of the path that names a file under `root`.
 fn on_stick(raw: &Path, root: &Path) -> Option<PathBuf> {
-    if raw.starts_with(root) && raw.is_file() {
-        return Some(raw.to_path_buf());
+    if raw.starts_with(root) {
+        return confined(root, raw);
     }
     let parts: Vec<String> = raw
         .to_string_lossy()
@@ -147,10 +163,5 @@ fn on_stick(raw: &Path, root: &Path) -> Option<PathBuf> {
                 .iter()
                 .fold(root.to_path_buf(), |p, part| p.join(part))
         })
-        .find(|candidate| {
-            candidate.is_file()
-                && candidate
-                    .components()
-                    .all(|c| !matches!(c, Component::ParentDir))
-        })
+        .find_map(|candidate| confined(root, &candidate))
 }

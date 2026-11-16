@@ -153,7 +153,8 @@ pub fn database_record(t: &ExportTrack, stick_path: &str, added: u32) -> Record 
     container("otrk", fields)
 }
 
-fn utf16be(bytes: &[u8]) -> String {
+/// Text of a UTF-16BE body, lossily.
+pub(crate) fn utf16be(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
         .as_chunks::<2>()
         .0
