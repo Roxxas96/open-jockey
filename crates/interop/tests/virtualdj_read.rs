@@ -39,6 +39,9 @@ fn reads_hotcues_loops_names_and_colours() {
         vec![VdjSong {
             path: PathBuf::from("/tmp/X/Artist - Title.mp3"),
             size: Some(9277127),
+            title: Some("Artist - Title".into()),
+            artist: None,
+            album: None,
             seconds_per_beat: Some(0.620703),
             pois: vec![
                 VdjPoi::Hotcue {
