@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VirtualDJ_Database Version="2026">
+ <Song FilePath="E:/VirtualDJ tracks/OJ Click 120.wav" FileSize="10584148">
+  <Tags Author="Open Jockey Fixture" Title="OJ Click 120" Flag="1" />
+  <Infos SongLength="60.0" LastModified="1794861223" FirstSeen="1794861168" Bitrate="1411" Cover="32" />
+  <Scan Version="801" Bpm="0.50" Phase="-0.001066" AltBpm="0.740726" Volume="1.381903" Key="A" AudioSig="___r8fBfrP_0AADw8g8PAMsB" Flag="32768" />
+  <Poi Type="automix" Point="realStart" />
+  <Poi Pos="59.538866" Type="automix" Point="realEnd" />
+  <Poi Type="automix" Point="fadeStart" />
+  <Poi Pos="59.50" Type="automix" Point="fadeEnd" />
+  <Poi Pos="6.028934" Num="1" Type="cue" />
+  <Poi Pos="26.189705" Num="2" Type="cue" />
+  <Poi Pos="46.026667" Num="3" Type="cue" />
+ </Song>
+ <Song FilePath="E:/VirtualDJ tracks/OJ Click 128.mp3" FileSize="1441453">
+  <Tags Author="Open Jockey Fixture" Title="OJ Click 128" Album="OJ Fixtures" Flag="1" />
+  <Infos SongLength="60.0" LastModified="1794861254" FirstSeen="1794861168" Bitrate="192" Cover="34" />
+  <Scan Version="801" Bpm="0.468764" Phase="-0.003356" AltBpm="0.703152" Volume="1.310839" Key="A" AudioSig="eP-Kx_Bf-_z1_0mV8wAAD8wB" Flag="32768" />
+  <Poi Type="automix" Point="realStart" />
+  <Poi Pos="59.570794" Type="automix" Point="realEnd" />
+  <Poi Type="automix" Point="fadeStart" />
+  <Poi Pos="59.550" Type="automix" Point="fadeEnd" />
+  <Poi Pos="9.549819" Num="1" Type="cue" />
+  <Poi Pos="33.906735" Num="2" Type="cue" />
+  <Poi Pos="45.482313" Num="3" Type="cue" />
+ </Song>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
+ <Song FilePath="E:/VirtualDJ tracks/OJ Click 126.mp3" FileSize="1441453">
+  <Tags Author="Open Jockey Fixture" Title="OJ Click 126" Album="OJ Fixtures" Flag="1" />
+  <Infos SongLength="60.0" LastModified="1794861212" FirstSeen="1794861168" Bitrate="192" Cover="34" />
+  <Scan Version="801" Bpm="0.476190" Phase="-0.002336" AltBpm="0.714286" Volume="1.259337" Key="A" AudioSig="_w-bx_CA-__1_0nw9gD2AMwB" Flag="32768" />
+  <Poi Type="automix" Point="realStart" />
+  <Poi Type="automix" Point="fadeStart" />
+  <Poi Name="Test 1" Pos="10.554195" Num="1" Type="cue" />
+  <Poi Name="TEst 2" Pos="28.60" Num="2" Type="cue" />
+  <Poi Name="Test 3" Pos="46.072268" Num="3" Type="cue" />
+  <Poi Pos="59.550" Type="automix" Point="fadeEnd" />
+  <Poi Pos="59.563537" Type="automix" Point="realEnd" />
+  <Poi Pos="38.120" Num="4" Type="loop" Size="8.0" />
+ </Song>
+</VirtualDJ_Database>
