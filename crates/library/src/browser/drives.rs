@@ -1,8 +1,7 @@
 //! The computer's drives: the roots of the browser's folder tree.
 
-use std::path::PathBuf;
-#[cfg(not(windows))]
-use std::{fs, path::Path};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[cfg(not(windows))]
 use crate::scan::is_hidden;
@@ -13,6 +12,45 @@ pub struct Drive {
     /// What the tree shows, such as "Macintosh HD".
     pub name: String,
     pub path: PathBuf,
+}
+
+/// Which apps' folders a volume's root holds, so it is a stick prepared by someone else's
+/// DJ software (a guest stick) and not one of the owner's own folders. Only the root is
+/// looked at, and nothing is written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GuestMarkers {
+    /// A `_Serato_` folder.
+    pub serato: bool,
+    /// A `PIONEER/rekordbox/export.pdb` file (a rekordbox device export).
+    pub rekordbox_device: bool,
+    /// A `rekordbox.xml` file.
+    pub rekordbox_xml: bool,
+    /// A `VirtualDJ` folder.
+    pub virtualdj: bool,
+}
+
+impl GuestMarkers {
+    /// Whether any app's marker is there.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.serato || self.rekordbox_device || self.rekordbox_xml || self.virtualdj
+    }
+}
+
+/// The markers on `root`'s own level: a `_Serato_` folder, `PIONEER/rekordbox/export.pdb`,
+/// `rekordbox.xml` and a `VirtualDJ` folder, and nothing deeper.
+#[must_use]
+pub fn guest_markers(root: &Path) -> GuestMarkers {
+    GuestMarkers {
+        serato: root.join("_Serato_").is_dir(),
+        rekordbox_device: root
+            .join("PIONEER")
+            .join("rekordbox")
+            .join("export.pdb")
+            .is_file(),
+        rekordbox_xml: root.join("rekordbox.xml").is_file(),
+        virtualdj: root.join("VirtualDJ").is_dir(),
+    }
 }
 
 /// The computer's drives, the system drive first.
@@ -122,5 +160,48 @@ mod tests {
         // No link to `/`: the default name.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(mac_drives(empty.path())[0].name, "Macintosh HD");
+    }
+}
+
+#[cfg(test)]
+mod guest_tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn guest_markers_finds_each_app() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name);
+        assert!(!guest_markers(root.path()).any());
+
+        fs::create_dir(at("_Serato_")).unwrap();
+        let found = guest_markers(root.path());
+        assert!(found.serato && found.any());
+        assert!(!found.rekordbox_device && !found.rekordbox_xml && !found.virtualdj);
+
+        fs::create_dir_all(at("PIONEER/rekordbox")).unwrap();
+        assert!(!guest_markers(root.path()).rekordbox_device);
+        fs::write(at("PIONEER/rekordbox/export.pdb"), b"").unwrap();
+        assert!(guest_markers(root.path()).rekordbox_device);
+
+        // A folder named like the xml file is not the file.
+        fs::create_dir(at("rekordbox.xml")).unwrap();
+        assert!(!guest_markers(root.path()).rekordbox_xml);
+        fs::remove_dir(at("rekordbox.xml")).unwrap();
+        fs::write(at("rekordbox.xml"), b"").unwrap();
+        assert!(guest_markers(root.path()).rekordbox_xml);
+
+        // A file named like the VirtualDJ folder is not the folder.
+        fs::write(at("VirtualDJ"), b"").unwrap();
+        assert!(!guest_markers(root.path()).virtualdj);
+        fs::remove_file(at("VirtualDJ")).unwrap();
+        fs::create_dir(at("VirtualDJ")).unwrap();
+        assert!(guest_markers(root.path()).virtualdj);
+
+        // Only the root counts, not what is deeper.
+        let deep = tempfile::tempdir().unwrap();
+        fs::create_dir_all(deep.path().join("music/_Serato_")).unwrap();
+        assert!(!guest_markers(deep.path()).any());
     }
 }

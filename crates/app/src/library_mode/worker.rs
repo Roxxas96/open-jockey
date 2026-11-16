@@ -14,12 +14,13 @@ use std::thread::JoinHandle;
 use engine::{DeckId, Hotcue, TrackBuffer, TrackMemory};
 use library::{
     Beatgrid, Browser, BrowserEdit, BrowserRequest, BrowserView, Drive, GridEdit, Library,
-    PendingTrack, Reader, TrackRow, WriteOp,
+    PendingTrack, Reader, TrackRow, WriteOp, guest_markers,
 };
 
 use super::delete::{self, Deleter, Trash};
 use super::memory_sync::engine_grid;
 use crate::format::safe;
+use crate::sticks::{Mounts, library_volumes, volume};
 
 /// The event when a playlist edit finds the entries it names moved since the window saw
 /// them: nothing is written.
@@ -230,7 +231,7 @@ fn run(
     let _ = events.send(Event::Browser(browser.view()));
     // What a delete never takes: Open Jockey's own folders.
     let own = delete::own_folders(lib.path());
-    let adder = FolderAdder::start(lib, events);
+    let adder = FolderAdder::start(lib, events, Mounts::usual());
     adder.offer(&browser);
     let (load_tx, load_rx) = channel::<LoadJob>();
     let loader_events = events.clone();
@@ -482,10 +483,13 @@ struct FolderAdder {
     /// False when the thread could not be started.
     running: bool,
     closed: Arc<AtomicBool>,
+    /// Reads the library folders, to tell a guest stick from the owner's drive.
+    folders: Option<Reader>,
+    mounts: Mounts,
 }
 
 impl FolderAdder {
-    fn start(lib: &Library, events: &Sender<Event>) -> Self {
+    fn start(lib: &Library, events: &Sender<Event>, mounts: Mounts) -> Self {
         let next = Arc::new((Mutex::new(None::<PathBuf>), Condvar::new()));
         let closed = Arc::new(AtomicBool::new(false));
         let (writer, reader) = (lib.writer(), lib.reader());
@@ -529,21 +533,49 @@ impl FolderAdder {
             tried: RefCell::new(HashSet::new()),
             running: thread.is_some(),
             closed,
+            folders: lib.reader().ok(),
+            mounts,
         }
     }
 
     /// Queues the browser's highlighted folder if it lists files the library lacks and
     /// was not tried yet.
     fn offer(&self, browser: &Browser) {
-        let Some(folder) = browser.folder_with_unknown_files() else {
-            return;
-        };
-        if !self.running || !self.tried.borrow_mut().insert(folder.clone()) {
-            return;
+        if let Some(folder) = browser.folder_with_unknown_files() {
+            self.offer_folder(folder);
+        }
+    }
+
+    /// Queues `folder` unless it is on a guest stick (a drive with an app marker and none
+    /// of the library's folders: its files are shown, never added), was tried already or
+    /// the thread is not running. Says whether it was queued.
+    fn offer_folder(&self, folder: PathBuf) -> bool {
+        if !self.running || self.on_guest_stick(&folder) {
+            return false;
+        }
+        if !self.tried.borrow_mut().insert(folder.clone()) {
+            return false;
         }
         let (lock, wake) = &*self.next;
         *lock.lock().unwrap_or_else(PoisonError::into_inner) = Some(folder);
         wake.notify_one();
+        true
+    }
+
+    /// Whether `folder`'s drive carries an app marker and holds no library folder. When the
+    /// library folders cannot be read, any drive with a marker counts: not adding is the
+    /// safe side.
+    fn on_guest_stick(&self, folder: &Path) -> bool {
+        let drive = volume(folder, &self.mounts.dirs);
+        if !guest_markers(&drive).any() {
+            return false;
+        }
+        let Some(folders) = self.folders.as_ref().and_then(|r| r.folders().ok()) else {
+            return true;
+        };
+        !library_volumes(&folders, &self.mounts)
+            .iter()
+            .any(|(volume, _)| *volume == drive)
     }
 
     /// Tells the thread to end once its current folder is done (it is not waited for, so
@@ -797,6 +829,57 @@ mod tests {
                 return found;
             }
         }
+    }
+
+    /// A mount dir holding the volumes `names`, each with the fixture as `song.wav`.
+    fn mount_with(names: &[&str]) -> (tempfile::TempDir, crate::sticks::Mounts) {
+        let dir = tempfile::tempdir().unwrap();
+        let mnt = dunce::canonicalize(dir.path()).unwrap().join("mnt");
+        for name in names {
+            std::fs::create_dir_all(mnt.join(name)).unwrap();
+            std::fs::copy(FIXTURE, mnt.join(name).join("song.wav")).unwrap();
+        }
+        let mounts = crate::sticks::Mounts {
+            dirs: vec![mnt],
+            drive_letters: false,
+        };
+        (dir, mounts)
+    }
+
+    fn empty_library() -> (tempfile::TempDir, Library) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("library.sqlite3")).unwrap();
+        (dir, lib)
+    }
+
+    #[test]
+    fn browsing_a_guest_stick_adds_nothing_to_the_library() {
+        let (_keep, mounts) = mount_with(&["STICK"]);
+        let stick = mounts.dirs[0].join("STICK");
+        std::fs::create_dir(stick.join("_Serato_")).unwrap();
+        let (_db, lib) = empty_library();
+        let (tx, events) = channel();
+        let adder = FolderAdder::start(&lib, &tx, mounts);
+        assert!(!adder.offer_folder(stick.clone()));
+        // Nothing is queued, so no event comes and the tracks stay empty.
+        assert!(events.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(ids(&lib).is_empty());
+        adder.stop();
+    }
+
+    #[test]
+    fn a_drive_holding_a_library_folder_is_still_added() {
+        let (_keep, mounts) = mount_with(&["OWNER"]);
+        let owner = mounts.dirs[0].join("OWNER");
+        std::fs::create_dir(owner.join("VirtualDJ")).unwrap();
+        let (_db, lib) = empty_library();
+        library::add_folder(&lib, &owner).unwrap();
+        let (tx, events) = channel();
+        let adder = FolderAdder::start(&lib, &tx, mounts);
+        assert!(adder.offer_folder(owner));
+        wait_for(&events, |e| matches!(e, Event::FolderAdded).then_some(()));
+        assert_eq!(ids(&lib).len(), 1);
+        adder.stop();
     }
 
     fn message(event: Event) -> Option<String> {

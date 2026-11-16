@@ -211,6 +211,63 @@ pub enum WriteOp {
     },
 }
 
+impl WriteOp {
+    /// Every track id the op names, in the order it names them. Guest tracks have
+    /// negative ids, and the writer refuses an op that names one.
+    ///
+    /// The match has no catch-all arm, so a new op must say here whether it names tracks.
+    #[must_use]
+    pub fn track_ids(&self) -> Vec<i64> {
+        match self {
+            Self::SetSetting { .. }
+            | Self::InsertTrack(_)
+            | Self::AddFolder(_)
+            | Self::RemoveFolder(_)
+            | Self::CreatePlaylist { .. }
+            | Self::RenamePlaylist { .. }
+            | Self::DeletePlaylist(_)
+            | Self::MovePlaylist { .. }
+            | Self::RemoveFromPlaylist { .. }
+            | Self::MoveInPlaylist { .. }
+            | Self::ExpectNoPlaylistNamed { .. }
+            | Self::Raw(_) => Vec::new(),
+            #[cfg(feature = "test-hooks")]
+            Self::PanicAfter { .. } => Vec::new(),
+            Self::UpdateTrack { id, .. }
+            | Self::ClearAnalysis(id)
+            | Self::ResetAnalysis(id)
+            | Self::TrackLoaded(id)
+            | Self::MarkStemsPrepared(id)
+            | Self::RemoveStems(id) => vec![*id],
+            Self::StoreAnalysis(store) => vec![store.track_id],
+            Self::PutStems(row) => vec![row.track_id],
+            Self::EditGrid { track, .. }
+            | Self::SetCue { track, .. }
+            | Self::SetHotcue { track, .. }
+            | Self::PutHotcue { track, .. }
+            | Self::SetHotcueLabel { track, .. }
+            | Self::DeleteHotcue { track, .. }
+            | Self::AddToPlaylist { track, .. }
+            | Self::SetCover { track, .. }
+            | Self::MissCover { track }
+            | Self::ClearCover { track } => vec![*track],
+            Self::MarkMissing(tracks) | Self::CreatePlaylistWith { tracks, .. } => tracks.clone(),
+            Self::ExpectPlaylistEntries { entries, .. } => {
+                entries.iter().map(|&(_, track)| track).collect()
+            }
+            Self::Batch(ops) => ops.iter().flat_map(Self::track_ids).collect(),
+        }
+    }
+}
+
+/// Fails with [`LibraryError::GuestTrack`] for the first negative id `op` names.
+fn refuse_guests(op: &WriteOp) -> Result<(), LibraryError> {
+    match op.track_ids().into_iter().find(|&id| id < 0) {
+        Some(id) => Err(LibraryError::GuestTrack(id)),
+        None => Ok(()),
+    }
+}
+
 /// The payload of [`WriteOp::PutStems`]: one stems cache entry.
 #[derive(Clone, PartialEq, Eq)]
 pub struct StemsRow {
@@ -348,8 +405,10 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// [`LibraryError::WriterGone`] once the library has been closed.
+    /// [`LibraryError::GuestTrack`] when `op` names a track with a negative id (nothing is
+    /// queued), or [`LibraryError::WriterGone`] once the library has been closed.
     pub fn submit(&self, op: WriteOp) -> Result<(), LibraryError> {
+        refuse_guests(&op)?;
         self.send(Message::Op { op, reply: None })
     }
 
@@ -357,9 +416,11 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// The op's own error (it was rolled back), or [`LibraryError::WriterGone`] once the
-    /// library has been closed.
+    /// [`LibraryError::GuestTrack`] when `op` names a track with a negative id (nothing is
+    /// queued), the op's own error (it was rolled back), or [`LibraryError::WriterGone`]
+    /// once the library has been closed.
     pub fn submit_wait(&self, op: WriteOp) -> Result<WriteOutcome, LibraryError> {
+        refuse_guests(&op)?;
         let (reply, result) = mpsc::channel();
         self.send(Message::Op {
             op,
