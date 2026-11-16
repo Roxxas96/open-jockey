@@ -111,7 +111,7 @@ pub struct LibraryMode {
     /// still in progress completed); one that fails on the same file is not retried
     /// until the next session or `library analyze`.
     enqueued: HashMap<i64, FileStamp>,
-    /// How many analysis jobs were queued since the start, less the ones Stop dropped.
+    /// How many analysis jobs the analyzer took since the start, less the ones Stop dropped.
     queued_total: usize,
     /// What `queued_total` was when the analysis last went idle: the pill counts the run
     /// since, so a new batch starts again at 0.
@@ -312,9 +312,9 @@ impl LibraryMode {
             .map(|t| t.id)
             .collect();
         if let (Some(analyzer), false) = (&self.analyzer, new.is_empty()) {
-            self.queued_total += new.len();
+            // Count what the analyzer took: it keeps one entry for a track already waiting.
+            self.queued_total += analyzer.enqueue(&new, false);
             self.analysis_stopped = false;
-            analyzer.enqueue(&new, false);
         }
     }
 
@@ -1459,13 +1459,26 @@ impl LibraryMode {
         })
     }
 
-    /// The browser line, then one line per loaded deck.
+    /// The browser line (with the analysis progress after it), then one line per loaded deck.
     pub fn status_lines(
         &self,
         engine: &EngineController,
         fx_slots: &[[engine::EffectKind; 3]; 4],
     ) -> Vec<String> {
         let mut lines = vec![browser_line(self.browser.as_ref(), self.notation)];
+        // The window shows the analysis as a footer pill; the terminal has no footer.
+        if let Some(pill) = self.jobs(Instant::now()).first() {
+            let state = match pill.state {
+                ui::JobState::Running => "",
+                ui::JobState::Pausing => " (pausing)",
+                ui::JobState::Paused => " (paused)",
+            };
+            lines[0].push_str(&format!(
+                "   analyzing {}/{}{state}",
+                pill.done.unwrap_or(0),
+                pill.total.unwrap_or(0)
+            ));
+        }
         for deck in DeckId::ALL {
             let snap = engine.deck(deck);
             if snap.loaded {
@@ -2531,6 +2544,43 @@ mod tests {
         new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
         let pill = analysis_pill(&mode).unwrap();
         assert_eq!((pill.done, pill.total), (Some(0), Some(3)));
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn the_terminal_status_still_shows_analysis_progress() {
+        let (_dir, mut mode, mut engine, printer) = mode();
+        let slots = [[engine::EffectKind::Echo; 3]; 4];
+        assert!(!mode.status_lines(&engine, &slots)[0].contains("analyzing"));
+        mode.job(JobKind::Analysis, JobOp::Pause);
+        new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
+        let line = mode.status_lines(&engine, &slots).remove(0);
+        assert!(line.ends_with("analyzing 0/3 (paused)"), "{line}");
+        mode.job(JobKind::Analysis, JobOp::Resume);
+        let line = mode.status_lines(&engine, &slots).remove(0);
+        assert!(
+            line.contains("analyzing 0/3") && !line.contains("paused"),
+            "{line}"
+        );
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn a_track_queued_twice_still_lets_the_batch_reach_its_total() {
+        let (_dir, mut mode, mut engine, printer) = mode();
+        mode.job(JobKind::Analysis, JobOp::Pause);
+        new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
+        // Track 1's file changed while it still waits: the analyzer keeps one entry.
+        mode.on_event(
+            Event::NewTracks(vec![pending(1, 20)]),
+            &mut engine,
+            &printer,
+        );
+        let pill = analysis_pill(&mode).unwrap();
+        assert_eq!(pill.total, Some(3), "counts what the analyzer holds");
+        assert_eq!(mode.queued_total, 3);
         mode.shutdown(&mut engine, &printer);
         printer.finish();
     }
