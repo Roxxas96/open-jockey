@@ -12,6 +12,10 @@ use super::{InteropError, read_file};
 pub struct VdjSong {
     pub path: PathBuf,
     pub size: Option<u64>,
+    /// From the `<Tags>` element (`Title`, `Author`, `Album`).
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
     /// VirtualDJ's scanned grid, as seconds per beat.
     pub seconds_per_beat: Option<f64>,
     pub pois: Vec<VdjPoi>,
@@ -69,6 +73,14 @@ pub fn read_database(path: &Path, drive_root: Option<&Path>) -> Result<Vec<VdjSo
                         current = Some(song);
                     }
                 }
+                "Tags" => {
+                    if let Some(song) = current.as_mut() {
+                        let text = |key| attr(&e, key).filter(|v| !v.trim().is_empty());
+                        song.title = text("Title");
+                        song.artist = text("Author");
+                        song.album = text("Album");
+                    }
+                }
                 "Scan" => {
                     if let Some(song) = current.as_mut() {
                         song.seconds_per_beat = attr(&e, "Bpm")
@@ -116,6 +128,9 @@ fn start_song(e: &BytesStart, drive_root: Option<&Path>) -> Result<VdjSong, Stri
     Ok(VdjSong {
         path: map_path(&file_path, drive_root),
         size: attr(e, "FileSize").and_then(|v| v.parse().ok()),
+        title: None,
+        artist: None,
+        album: None,
         seconds_per_beat: None,
         pois: Vec::new(),
         other_markers: 0,

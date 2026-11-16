@@ -3,6 +3,7 @@
 //! data on the computer; on a stick, only to what Open Jockey wrote itself.
 
 pub mod export;
+pub mod guest;
 pub mod import;
 pub mod virtualdj;
 

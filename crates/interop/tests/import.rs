@@ -62,6 +62,9 @@ fn song(path: &str, pois: Vec<VdjPoi>) -> VdjSong {
     VdjSong {
         path: PathBuf::from(path),
         size: Some(1000),
+        title: None,
+        artist: None,
+        album: None,
         seconds_per_beat: Some(0.5),
         pois,
         other_markers: 0,
