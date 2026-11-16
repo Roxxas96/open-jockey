@@ -1056,6 +1056,9 @@ fn the_next_export_completes_a_stopped_one() {
             .playlists
             .is_empty()
     );
+    let stopped = Manifest::read(&s.stick).unwrap().unwrap();
+    assert!(stopped.crates.is_empty(), "{:?}", stopped.crates);
+    assert!(stopped.vdj_lists.is_empty(), "{:?}", stopped.vdj_lists);
 
     let done = export(&s, &[x]);
     assert!(!done.stopped);
