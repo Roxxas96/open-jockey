@@ -177,8 +177,8 @@ and nothing is deleted.
 ## What each area shows
 
 - **Top bar:** the LAYOUT menu (see [The LAYOUT menu](#the-layout-menu)), the layout's name,
-  the settings gear, status and events, the master meter, CPU load, the clock, and the
-  controller and audio state.
+  the settings gear, the master meter, CPU load, the clock, and the controller and audio
+  state. Messages are in the [footer](#the-footer).
 - **Waveform lanes:** the decks both sides show, plus any other deck that is playing; in
   the 4-Decks view, all four. The LAYOUT menu picks the style: Frequency (colour follows
   frequency), Deck colour, Bands (low, mid and high drawn as separate bands) or Overlaid
@@ -245,6 +245,46 @@ and nothing is deleted.
   are added and analysed in the background, so BPM and key fill in as they finish.
 - **Panels:** the dividers, the info panel and the sideview are described in
   [Dividers, folding and the sideview](#dividers-folding-and-the-sideview).
+
+## The footer
+
+The window's bottom edge is one line of text, never more, with three parts:
+
+- **Left:** the open list, as `name · N tracks · length`; `N selected` while rows are
+  selected; `N files` for a folder.
+- **Middle:** the latest message. An error stays until it is dealt with; an event fades
+  after 8 seconds; when there is neither, the status text shows (the browser's place and
+  the decks' names). Messages used to be in the top bar.
+- **Right:** one pill for each background job that is running or paused: its label,
+  done / total, a small bar, the time left, a Pause (or Resume) button and a Stop button.
+  Resting the pointer on a pill shows the item it is on.
+
+The time left shows once a job has done at least 3 items and run at least 5 seconds, and is
+worked out from the last 60 seconds of its pace. It is rounded: under 90 seconds is
+"~1 min", under an hour "~N min", else "~N h". A paused job shows "Paused" instead (or
+"Pausing…" while the items already in flight finish). When the window is narrow, the footer
+gives up the time left first, then the list's length; the message takes at most half the
+width.
+
+What each job does:
+
+- **Analysis:** Pause overrides the throttle that applies while a deck plays; tracks already
+  being analysed finish. Stop clears the queue; the next launch or library rescan queues what
+  is left.
+- **Covers:** Pause makes no network request until resumed. Stop lasts until the next
+  launch, library scan or "Retry missing covers". "Find another cover" still works while
+  covers are paused or stopped. There is no pill while cover lookup is turned off.
+- **Library scan:** shows "Scanning <folder>…" with no count, and has no Pause or Stop.
+- **VirtualDJ import:** "Reading VirtualDJ…" can be stopped, and nothing is written. Once it
+  is "Writing playlists…" it cannot: the buttons are disabled, with a tooltip saying why.
+- **Stems:** one pill for all of them, such as "Separating stems 2 / 5". Pause starts no new
+  track; Stop cancels the queue, and it does not come back.
+- **USB export:** Pause waits between files. Stop takes effect between files and writes no
+  Serato, Rekordbox or VirtualDJ library file, so the stick keeps its previous playlists.
+  Files already copied stay, and the next export finishes the stick. The events say
+  "Export stopped: N of M files copied; the stick keeps its previous playlists".
+
+A pause does not survive a relaunch: the jobs start again on their own.
 
 ## Waveform colours
 

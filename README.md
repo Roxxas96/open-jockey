@@ -25,6 +25,9 @@ start (the 10 newest backups are kept):
   without one (only artist and title, or the file name, are sent, to Deezer and
   MusicBrainz; turn it off with `library.cover_lookup`). See [docs/ui.md](docs/ui.md#keyboard)
   and [docs/library.md](docs/library.md#covers-found-online).
+- A footer that shows the open list, the latest message and a pill for each background job
+  (analysis, covers, scans, imports, exports, stems) with its time left, Pause and Stop; see
+  [docs/ui.md](docs/ui.md#the-footer).
 - A one-time import of VirtualDJ hotcues, saved loops and playlists (`library import-vdj`, or
   Settings, Library in the window); see [docs/library.md](docs/library.md#importing-from-virtualdj).
 - Export of playlists to a USB stick for Serato, Rekordbox and VirtualDJ, in order, with their
