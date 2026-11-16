@@ -573,7 +573,10 @@ impl Worker {
                 }
             }
             pending.retain(|(job, _)| {
-                let cancelled = job.cancel.load(Ordering::Relaxed);
+                // A stop that came after the lookup missed: the control loop may not have
+                // seen `Queued` yet, so only `stopped` was set.
+                let cancelled =
+                    job.cancel.load(Ordering::Relaxed) || job.stopped.load(Ordering::Relaxed);
                 if cancelled {
                     self.reply(Reply::Done(job.id));
                 }
@@ -597,6 +600,10 @@ impl Worker {
                 Model::Ready(_) if self.shared.paused.load(Ordering::Relaxed) => {}
                 Model::Ready(_) => {
                     let (job, fingerprint) = pending.pop_front().expect("a front job");
+                    if job.stopped.load(Ordering::Relaxed) {
+                        self.reply(Reply::Done(job.id));
+                        continue;
+                    }
                     self.shared.separating.store(true, Ordering::Relaxed);
                     let misses = self.separate(job, &fingerprint, jobs);
                     self.shared.separating.store(false, Ordering::Relaxed);
