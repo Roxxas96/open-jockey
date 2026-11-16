@@ -31,6 +31,10 @@ pub(super) struct Export {
     pace: Mutex<Pace>,
     /// News for the event line, taken by [`Export::take_events`].
     events: Vec<String>,
+    /// Holds the next writing thread before its first file until a message comes, so a
+    /// test can pause it first.
+    #[cfg(test)]
+    gate: Option<Receiver<()>>,
 }
 
 /// What the export is doing, besides what it shows.
@@ -74,9 +78,14 @@ struct Run {
 
 impl Run {
     /// Called by the export between two files: waits while paused (a stop ends the wait)
-    /// and says whether to go on.
+    /// and says whether to go on. The last call, once everything is written, never waits,
+    /// so a finished export does not show "Paused".
     fn control(&self, progress: ExportProgress) -> ExportControl {
         self.done.store(progress.done, Ordering::Relaxed);
+        if progress.done >= progress.total {
+            self.waiting.store(false, Ordering::Relaxed);
+            return ExportControl::Go;
+        }
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 self.waiting.store(false, Ordering::Relaxed);
@@ -88,6 +97,16 @@ impl Run {
             }
             self.waiting.store(true, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for Export {
+    /// A session that ends while the export writes stops it as the footer's Stop does:
+    /// a paused thread is released, and the stick keeps its previous playlists.
+    fn drop(&mut self) {
+        if let State::Writing(w) = &self.state {
+            w.run.stop.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -120,6 +139,8 @@ impl Export {
             view: ExportView::Idle,
             pace: Mutex::new(Pace::new()),
             events: Vec::new(),
+            #[cfg(test)]
+            gate: None,
         }
     }
 
@@ -329,7 +350,13 @@ impl Export {
         let run = Arc::new(Run::default());
         let (tx, rx) = channel();
         let thread_run = Arc::clone(&run);
+        #[cfg(test)]
+        let gate = self.gate.take();
         if self.spawn(move || {
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
             let control = |p: ExportProgress| {
                 let _ = tx.send(Written::Progress(p));
                 thread_run.control(p)
@@ -651,24 +678,42 @@ mod tests {
         commands::drain(&s.commands, &mut s.parts, None);
     }
 
+    /// Starts the checked export with its thread held before the first file, pauses it,
+    /// then lets it go: it copies one file and waits.
+    fn write_paused(s: &mut Setup) {
+        let (open, gate) = channel();
+        s.parts.export.as_mut().unwrap().gate = Some(gate);
+        s.send(ExportStep::Write);
+        job_op(s, ui::JobOp::Pause);
+        open.send(()).unwrap();
+        // The file in flight finishes, then the export waits: "pausing", then "paused".
+        let began = Instant::now();
+        while job_of(s).unwrap().state != ui::JobState::Paused {
+            assert!(began.elapsed() < Duration::from_secs(10), "never paused");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn a_paused_export_copies_nothing_until_resumed() {
         let mut s = setup();
         with_tracks_ready(&mut s, &["b.wav", "c.wav", "d.wav"]);
+        let (open, gate) = channel();
+        s.parts.export.as_mut().unwrap().gate = Some(gate);
         s.send(ExportStep::Write);
         let pill = job_of(&s).expect("the pill shows while writing");
         assert_eq!(pill.kind, ui::JobKind::Export);
         assert_eq!(pill.label, "Exporting to STICK");
         assert_eq!(pill.total, Some(4));
         job_op(&mut s, ui::JobOp::Pause);
-        // The file in flight finishes, then the export waits: "pausing", then "paused".
+        open.send(()).unwrap();
         let began = Instant::now();
         while job_of(&s).unwrap().state != ui::JobState::Paused {
             assert!(began.elapsed() < Duration::from_secs(10), "never paused");
             std::thread::sleep(Duration::from_millis(5));
         }
         let held = copies(&s);
-        assert!(held < 4, "{held} copies");
+        assert_eq!(held, 1, "the file in flight, and no other");
         std::thread::sleep(Duration::from_millis(200));
         commands::drain(&s.commands, &mut s.parts, None);
         assert_eq!(copies(&s), held, "nothing is copied while paused");
@@ -685,14 +730,9 @@ mod tests {
     fn a_stop_while_paused_ends_the_export_with_an_event() {
         let mut s = setup();
         with_tracks_ready(&mut s, &["b.wav", "c.wav", "d.wav"]);
-        s.send(ExportStep::Write);
-        job_op(&mut s, ui::JobOp::Pause);
-        let began = Instant::now();
-        while job_of(&s).unwrap().state != ui::JobState::Paused {
-            assert!(began.elapsed() < Duration::from_secs(10), "never paused");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        write_paused(&mut s);
         let held = copies(&s);
+        assert_eq!(held, 1);
         job_op(&mut s, ui::JobOp::Stop);
         let ExportView::Done(text) = s.settled() else {
             panic!("not done: {:?}", s.view());
@@ -708,6 +748,50 @@ mod tests {
         assert_eq!(copies(&s), held);
         // No library file was written: the stick has no crates yet.
         assert!(!s.stick.join("_Serato_").join("Subcrates").exists());
+    }
+
+    /// Closing the session while an export is paused releases its thread, which stops
+    /// as a footer stop does.
+    #[test]
+    fn dropping_a_paused_export_stops_its_thread() {
+        let mut s = setup();
+        with_tracks_ready(&mut s, &["b.wav", "c.wav", "d.wav"]);
+        write_paused(&mut s);
+        let export = s.parts.export.take().unwrap();
+        let State::Writing(w) = &export.state else {
+            panic!("not writing");
+        };
+        let run = Arc::clone(&w.run);
+        drop(export);
+        // The thread lets its share of the run go when it ends.
+        let began = Instant::now();
+        while Arc::strong_count(&run) > 1 {
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "the paused thread was never released"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(copies(&s), 1);
+        assert!(!s.stick.join("_Serato_").join("Subcrates").exists());
+    }
+
+    /// The last call, once everything is written, never waits: a finished export does
+    /// not show "Paused".
+    #[test]
+    fn the_final_progress_never_waits_for_a_resume() {
+        let run = Arc::new(Run::default());
+        run.paused.store(true, Ordering::Relaxed);
+        let (tx, rx) = channel();
+        let thread_run = Arc::clone(&run);
+        std::thread::spawn(move || {
+            let _ = tx.send(thread_run.control(ExportProgress { done: 4, total: 4 }));
+        });
+        let answer = rx.recv_timeout(Duration::from_secs(2));
+        // Let a waiting thread go, whatever the answer.
+        run.stop.store(true, Ordering::Relaxed);
+        assert_eq!(answer, Ok(ExportControl::Go));
+        assert!(!run.waiting.load(Ordering::Relaxed));
     }
 
     #[test]
