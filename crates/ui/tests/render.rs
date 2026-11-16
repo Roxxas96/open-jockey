@@ -71,6 +71,48 @@ fn render_every_layout() {
     render("pro-light", Layout::Pro, false, WINDOW, ColourScheme::Light);
 }
 
+/// The Pro layout with two jobs in the footer, an analysis and a paused cover lookup, and a
+/// message.
+#[test]
+#[ignore = "needs a GPU; writes target/ui-render/*.png"]
+fn render_the_footer() {
+    let (mut frame, reads) = support::loaded(Layout::Pro, false);
+    frame.jobs = vec![
+        ui::JobView {
+            kind: ui::JobKind::Analysis,
+            label: "Analysing".to_owned(),
+            done: Some(312),
+            total: Some(4536),
+            eta: Some(std::time::Duration::from_secs(6 * 60)),
+            state: ui::JobState::Running,
+            current: Some("Daft Punk - One More Time.flac".to_owned()),
+            note: None,
+            can_pause: true,
+            can_stop: true,
+            locked: None,
+        },
+        ui::JobView {
+            kind: ui::JobKind::Covers,
+            label: "Finding covers".to_owned(),
+            done: Some(40),
+            total: Some(220),
+            eta: None,
+            state: ui::JobState::Paused,
+            current: None,
+            note: None,
+            can_pause: true,
+            can_stop: true,
+            locked: None,
+        },
+    ];
+    // Stamped ahead: setting up the GPU takes longer than the eight seconds an event shows.
+    frame.events.push_back((
+        std::time::Instant::now() + std::time::Duration::from_secs(600),
+        "Scan finished: 4,536 tracks".to_owned(),
+    ));
+    render_with("pro-footer", frame, reads, WINDOW);
+}
+
 #[test]
 #[ignore = "needs a GPU; writes target/ui-render/*.png"]
 fn render_a_held_roll() {
