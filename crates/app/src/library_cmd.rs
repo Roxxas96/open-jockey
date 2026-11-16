@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use interop::export::{REKORDBOX_STEPS, TrackAction};
-use interop::{ExportPlan, ExportProgress};
+use interop::{ExportControl, ExportPlan, ExportProgress};
 use library::{
     Analyzer, BPM_RANGE, GridEdit, GridError, KEY_NOTATION, Library, PlaylistSummary, Reader,
     ScanProgress, ScanReport, StemCache, StemKey, TrackFilter, TrackRow, TrackSort, TrackSortKey,
@@ -435,7 +435,11 @@ fn export_lines(
         lines.push("Nothing written. Run again with --write to export.".to_owned());
         return Ok(lines);
     }
-    let report = interop::run(&plan, progress)?;
+    // The terminal has no way to stop an export: it always goes on.
+    let report = interop::run(&plan, &|p| {
+        progress(p);
+        ExportControl::Go
+    })?;
     lines.push(format!(
         "Exported: {} copied, {} kept, {} re-tagged, {} removed.",
         report.copied, report.kept, report.retagged, report.removed

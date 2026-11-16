@@ -101,6 +101,18 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
                     import.stop();
                 }
             }
+            UiCommand::Job {
+                kind: JobKind::Export,
+                op,
+            } => {
+                if let Some(export) = parts.export.as_mut() {
+                    match op {
+                        JobOp::Pause => export.pause(true),
+                        JobOp::Resume => export.pause(false),
+                        JobOp::Stop => export.stop(),
+                    }
+                }
+            }
             // The import is a single read and write: it has no pause. The scan has no
             // ops either.
             UiCommand::Job {
@@ -137,8 +149,12 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
     if parts.import.as_mut().is_some_and(Import::poll) {
         parts.refresh_marks();
     }
-    if let Some(export) = parts.export.as_mut() {
+    let export_news = parts.export.as_mut().map(|export| {
         export.poll();
+        export.take_events()
+    });
+    for text in export_news.unwrap_or_default() {
+        parts.event(text);
     }
     if let Some(settings) = parts.settings.as_mut() {
         let before = settings.config().ui.clone();

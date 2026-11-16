@@ -4,13 +4,17 @@
 //!
 //! The export only reads the library, so the decks may hold tracks meanwhile.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use interop::export::REKORDBOX_STEPS;
-use interop::{ExportPlan, ExportProgress, ExportReport, Manifest};
+use interop::{ExportControl, ExportPlan, ExportProgress, ExportReport, Manifest};
 use library::Library;
-use ui::{ExportChoice, ExportStep, ExportSummary, ExportView, PlaylistLabel, StickLabel};
+use ui::{ExportChoice, ExportStep, ExportSummary, ExportView, JobView, PlaylistLabel, StickLabel};
+
+use super::jobs::{self, ExportFacts, Pace};
 
 use crate::format::{megabytes, safe};
 use crate::library_cmd::export_summary;
@@ -22,6 +26,11 @@ pub(super) struct Export {
     mounts: Mounts,
     state: State,
     view: ExportView,
+    /// Measures the writing's speed for the footer's time left; only the control thread
+    /// touches it.
+    pace: Mutex<Pace>,
+    /// News for the event line, taken by [`Export::take_events`].
+    events: Vec<String>,
 }
 
 /// What the export is doing, besides what it shows.
@@ -34,11 +43,53 @@ enum State {
     Checking(Listed, Receiver<Result<Checked, String>>),
     /// The summary shows.
     Checked(Listed, Box<Checked>),
-    /// Writing to the stick called `stick`.
-    Writing {
-        rx: Receiver<Written>,
-        stick: String,
-    },
+    /// Writing to a stick.
+    Writing(Writing),
+}
+
+/// An export being written on its thread.
+struct Writing {
+    rx: Receiver<Written>,
+    /// The stick's name.
+    stick: String,
+    /// What the footer's pause and stop say to the thread, and what it says back.
+    run: Arc<Run>,
+    /// What each track is called, in the order they are copied.
+    names: Vec<String>,
+}
+
+/// What the window and the writing thread tell each other, with no lock: the thread reads
+/// the flags between two files and the control loop reads the counts for the footer.
+#[derive(Default)]
+struct Run {
+    /// The footer paused the export: the thread waits after the file it is on.
+    paused: AtomicBool,
+    /// The footer stopped it: the thread stops after the file it is on.
+    stop: AtomicBool,
+    /// The thread is waiting for a resume, copying nothing.
+    waiting: AtomicBool,
+    /// Steps the thread finished: one per track, then one for the library files.
+    done: AtomicUsize,
+}
+
+impl Run {
+    /// Called by the export between two files: waits while paused (a stop ends the wait)
+    /// and says whether to go on.
+    fn control(&self, progress: ExportProgress) -> ExportControl {
+        self.done.store(progress.done, Ordering::Relaxed);
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                self.waiting.store(false, Ordering::Relaxed);
+                return ExportControl::Stop;
+            }
+            if !self.paused.load(Ordering::Relaxed) {
+                self.waiting.store(false, Ordering::Relaxed);
+                return ExportControl::Go;
+            }
+            self.waiting.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 /// The sticks found, and the choice made of them for the window.
@@ -67,7 +118,57 @@ impl Export {
             mounts,
             state: State::Rest,
             view: ExportView::Idle,
+            pace: Mutex::new(Pace::new()),
+            events: Vec::new(),
         }
+    }
+
+    /// The footer's pill while the export writes.
+    pub fn job(&self, now: Instant) -> Option<JobView> {
+        let State::Writing(w) = &self.state else {
+            return None;
+        };
+        let files = w.names.len();
+        let done = w.run.done.load(Ordering::Relaxed).min(files);
+        let paused = w.run.paused.load(Ordering::Relaxed);
+        let eta = {
+            let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
+            if paused {
+                pace.pause();
+            } else {
+                pace.sample(now, done, files);
+            }
+            pace.eta(now)
+        };
+        Some(jobs::export_job(ExportFacts {
+            stick: w.stick.clone(),
+            done,
+            total: files,
+            paused,
+            waiting: w.run.waiting.load(Ordering::Relaxed),
+            current: w.names.get(done).cloned(),
+            eta,
+        }))
+    }
+
+    /// The footer's pause and resume: the export waits after the file it is on.
+    pub fn pause(&mut self, paused: bool) {
+        if let State::Writing(w) = &self.state {
+            w.run.paused.store(paused, Ordering::Relaxed);
+        }
+    }
+
+    /// The footer's stop: the export stops after the file it is on, before any library
+    /// file is written.
+    pub fn stop(&mut self) {
+        if let State::Writing(w) = &self.state {
+            w.run.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// What the export has to say to the event line since the last call.
+    pub fn take_events(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.events)
     }
 
     /// What the window shows.
@@ -124,18 +225,18 @@ impl Export {
                 Ok(Err(why)) => self.fail(why),
                 Err(TryRecvError::Disconnected) => self.fail(STOPPED.to_owned()),
             },
-            State::Writing { rx, stick } => self.take_written(rx, stick),
+            State::Writing(w) => self.take_written(w),
             other => self.state = other,
         }
         self.view != before
     }
 
     /// Takes what the writing thread sent since the last poll.
-    fn take_written(&mut self, rx: Receiver<Written>, stick: String) {
+    fn take_written(&mut self, w: Writing) {
         loop {
-            match rx.try_recv() {
+            match w.rx.try_recv() {
                 Err(TryRecvError::Empty) => {
-                    self.state = State::Writing { rx, stick };
+                    self.state = State::Writing(w);
                     return;
                 }
                 Ok(Written::Progress(p)) => {
@@ -146,7 +247,12 @@ impl Export {
                 }
                 Ok(Written::Done(result)) => {
                     match result {
-                        Ok(report) => self.view = ExportView::Done(done_text(&report, &stick)),
+                        Ok(report) if report.stopped => {
+                            let text = stopped_text(&report, w.names.len());
+                            self.events.push(text.clone());
+                            self.view = ExportView::Done(text);
+                        }
+                        Ok(report) => self.view = ExportView::Done(done_text(&report, &w.stick)),
                         Err(why) => self.view = ExportView::Failed(why),
                     }
                     return;
@@ -209,18 +315,35 @@ impl Export {
         };
         let Checked { plan, summary } = *checked;
         let total = plan.tracks.len() + 1;
+        let names = plan
+            .tracks
+            .iter()
+            .map(|t| {
+                let track = &t.track;
+                safe(match &track.artist {
+                    Some(artist) => format!("{artist} – {}", track.title),
+                    None => track.title.clone(),
+                })
+            })
+            .collect();
+        let run = Arc::new(Run::default());
         let (tx, rx) = channel();
+        let thread_run = Arc::clone(&run);
         if self.spawn(move || {
-            let progress = |p: ExportProgress| {
+            let control = |p: ExportProgress| {
                 let _ = tx.send(Written::Progress(p));
+                thread_run.control(p)
             };
-            let result = interop::run(&plan, &progress).map_err(|e| safe(format!("{e}")));
+            let result = interop::run(&plan, &control).map_err(|e| safe(format!("{e}")));
             let _ = tx.send(Written::Done(result));
         }) {
-            self.state = State::Writing {
+            *self.pace.lock().unwrap_or_else(PoisonError::into_inner) = Pace::new();
+            self.state = State::Writing(Writing {
                 rx,
                 stick: summary.stick,
-            };
+                run,
+                names,
+            });
             self.view = ExportView::Writing { done: 0, total };
         }
     }
@@ -316,6 +439,15 @@ fn free_text(bytes: Option<u64>) -> String {
     bytes.map_or_else(|| "?".to_owned(), megabytes)
 }
 
+/// What the window and the event line say of an export that was stopped after `files` tracks
+/// were planned.
+fn stopped_text(report: &ExportReport, files: usize) -> String {
+    format!(
+        "Export stopped: {} of {files} files copied; the stick keeps its previous playlists",
+        report.copied + report.kept + report.retagged
+    )
+}
+
 /// What the window shows once `report` is written to the stick called `stick`.
 fn done_text(report: &ExportReport, stick: &str) -> String {
     let playlists = if report.playlists == 1 {
@@ -358,6 +490,8 @@ mod tests {
     /// `/Volumes` with one stick in it, and the session's parts exporting to it.
     struct Setup {
         _dir: tempfile::TempDir,
+        /// The library's one folder.
+        music: PathBuf,
         /// The one stick, `<temp>/volumes/STICK`.
         stick: PathBuf,
         /// The playlist "Mix".
@@ -406,6 +540,7 @@ mod tests {
         let (window, commands) = channel();
         Setup {
             _dir: dir,
+            music,
             stick,
             mix,
             parts,
@@ -456,6 +591,123 @@ mod tests {
         fn manifest(&self) -> PathBuf {
             self.stick.join("Open Jockey").join("export.toml")
         }
+    }
+
+    /// Adds `names` as copies of the first track to the library and to "Mix", and checks
+    /// the export of "Mix" to the stick, ready to write.
+    fn with_tracks_ready(s: &mut Setup, names: &[&str]) {
+        let music = s.music.clone();
+        for name in names {
+            std::fs::copy(STEREO, music.join(name)).unwrap();
+        }
+        let lib = Arc::clone(&s.parts.export.as_ref().unwrap().lib);
+        library::scan_folder(&lib, &music, &mut |_| {}).unwrap();
+        for name in names {
+            let track = id_of(&lib, &music.join(name));
+            lib.writer()
+                .submit_wait(WriteOp::AddToPlaylist {
+                    playlist: s.mix,
+                    track,
+                    at: None,
+                })
+                .unwrap();
+        }
+        s.send(ExportStep::Open);
+        s.settled();
+        s.send(ExportStep::Check {
+            stick: 0,
+            playlists: vec![s.mix],
+        });
+        assert!(matches!(s.settled(), ExportView::Summary(_)));
+    }
+
+    fn job_of(s: &Setup) -> Option<ui::JobView> {
+        s.parts.export.as_ref().unwrap().job(Instant::now())
+    }
+
+    fn copies(s: &Setup) -> usize {
+        let music = s.stick.join("Open Jockey").join("Music");
+        let mut n = 0;
+        let mut todo = vec![music];
+        while let Some(dir) = todo.pop() {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                if entry.path().is_dir() {
+                    todo.push(entry.path());
+                } else if !entry.path().to_string_lossy().ends_with(".ojpart") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn job_op(s: &mut Setup, op: ui::JobOp) {
+        s.window
+            .send(UiCommand::Job {
+                kind: ui::JobKind::Export,
+                op,
+            })
+            .unwrap();
+        commands::drain(&s.commands, &mut s.parts, None);
+    }
+
+    #[test]
+    fn a_paused_export_copies_nothing_until_resumed() {
+        let mut s = setup();
+        with_tracks_ready(&mut s, &["b.wav", "c.wav", "d.wav"]);
+        s.send(ExportStep::Write);
+        let pill = job_of(&s).expect("the pill shows while writing");
+        assert_eq!(pill.kind, ui::JobKind::Export);
+        assert_eq!(pill.label, "Exporting to STICK");
+        assert_eq!(pill.total, Some(4));
+        job_op(&mut s, ui::JobOp::Pause);
+        // The file in flight finishes, then the export waits: "pausing", then "paused".
+        let began = Instant::now();
+        while job_of(&s).unwrap().state != ui::JobState::Paused {
+            assert!(began.elapsed() < Duration::from_secs(10), "never paused");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let held = copies(&s);
+        assert!(held < 4, "{held} copies");
+        std::thread::sleep(Duration::from_millis(200));
+        commands::drain(&s.commands, &mut s.parts, None);
+        assert_eq!(copies(&s), held, "nothing is copied while paused");
+        assert!(matches!(s.view(), ExportView::Writing { .. }));
+        assert_eq!(job_of(&s).unwrap().eta, None);
+
+        job_op(&mut s, ui::JobOp::Resume);
+        assert!(matches!(s.settled(), ExportView::Done(_)));
+        assert_eq!(copies(&s), 4);
+        assert!(job_of(&s).is_none());
+    }
+
+    #[test]
+    fn a_stop_while_paused_ends_the_export_with_an_event() {
+        let mut s = setup();
+        with_tracks_ready(&mut s, &["b.wav", "c.wav", "d.wav"]);
+        s.send(ExportStep::Write);
+        job_op(&mut s, ui::JobOp::Pause);
+        let began = Instant::now();
+        while job_of(&s).unwrap().state != ui::JobState::Paused {
+            assert!(began.elapsed() < Duration::from_secs(10), "never paused");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let held = copies(&s);
+        job_op(&mut s, ui::JobOp::Stop);
+        let ExportView::Done(text) = s.settled() else {
+            panic!("not done: {:?}", s.view());
+        };
+        let expected = format!(
+            "Export stopped: {held} of 4 files copied; the stick keeps its previous playlists"
+        );
+        assert_eq!(text, expected);
+        assert_eq!(
+            s.parts.events.iter().map(|(_, t)| t.as_str()).next_back(),
+            Some(expected.as_str())
+        );
+        assert_eq!(copies(&s), held);
+        // No library file was written: the stick has no crates yet.
+        assert!(!s.stick.join("_Serato_").join("Subcrates").exists());
     }
 
     #[test]

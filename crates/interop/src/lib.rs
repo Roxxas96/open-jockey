@@ -7,8 +7,8 @@ pub mod import;
 pub mod virtualdj;
 
 pub use export::{
-    ExportError, ExportPlan, ExportProgress, ExportReport, ExportSet, Manifest, free_space, gather,
-    plan_export, run,
+    ExportControl, ExportError, ExportPlan, ExportProgress, ExportReport, ExportSet, Manifest,
+    free_space, gather, plan_export, run,
 };
 pub use import::{
     ImportPlan, ImportReport, PlaylistAction, PlaylistImport, Resolution, TrackImport, apply,
