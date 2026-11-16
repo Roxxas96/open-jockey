@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, on_stick as confined,
+    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, dir_on_stick, on_stick as confined,
     track_from_tags,
 };
 use crate::virtualdj::{VdjPoi, VdjSong, read_database, read_playlists};
@@ -28,7 +28,13 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     };
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
 
-    if database.is_file() {
+    if !dir_on_stick(root, &dir) {
+        source.problem = Some("VirtualDJ is outside this stick".into());
+        return Some(source);
+    }
+    if database.is_file() && confined(root, &database).is_none() {
+        problems.push("database.xml is outside this stick".to_owned());
+    } else if database.is_file() {
         match read_database(&database, Some(root)) {
             Ok(songs) => {
                 let mut outside = 0;
@@ -54,9 +60,12 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     }
 
     let lists = dir.join("MyLists");
-    if lists.is_dir() {
+    if lists.is_dir() && !dir_on_stick(root, &lists) {
+        problems.push("MyLists is outside this stick".to_owned());
+    } else if lists.is_dir() {
         let order = lists.join("order");
-        match read_playlists(&[lists], Some(order.as_path()).filter(|p| p.is_file())) {
+        let order = confined(root, &order);
+        match read_playlists(&[lists], order.as_deref()) {
             Ok((playlists, errors)) => {
                 problems.extend(errors.iter().map(ToString::to_string));
                 let mut dropped = 0;
