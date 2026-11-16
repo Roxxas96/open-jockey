@@ -38,7 +38,11 @@ fn format_error(path: &Path, why: impl ToString) -> ExportError {
     }
 }
 
-fn read_id3(copy: &Path, kind: &FileKind) -> Result<Option<Id3v2Tag>, ExportError> {
+/// The ID3v2 tag of `copy` (an MP3's, or a WAV's `id3 ` chunk), if it has one.
+///
+/// # Errors
+/// [`ExportError`] when the file cannot be opened or parsed.
+pub(crate) fn read_id3(copy: &Path, kind: &FileKind) -> Result<Option<Id3v2Tag>, ExportError> {
     let mut file = File::open(copy).map_err(|source| ExportError::Io {
         path: copy.to_path_buf(),
         source,
@@ -56,7 +60,7 @@ fn read_id3(copy: &Path, kind: &FileKind) -> Result<Option<Id3v2Tag>, ExportErro
 }
 
 /// The `Serato *` GEOB frames in `tag`, description to data.
-fn serato_frames(tag: &Id3v2Tag) -> BTreeMap<String, Vec<u8>> {
+pub(crate) fn serato_frames(tag: &Id3v2Tag) -> BTreeMap<String, Vec<u8>> {
     tag.iter()
         .filter_map(|frame| {
             let Frame::Binary(bin) = frame else {

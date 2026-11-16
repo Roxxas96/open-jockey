@@ -65,7 +65,7 @@ pub enum FileKind {
 }
 
 impl FileKind {
-    fn of(path: &std::path::Path) -> Self {
+    pub(crate) fn of(path: &std::path::Path) -> Self {
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())

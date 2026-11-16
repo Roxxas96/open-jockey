@@ -94,8 +94,14 @@ fn a_broken_database_keeps_the_other_apps() {
     let source = vdj(&stick);
     let problem = source.problem.as_deref().expect("a problem");
     assert!(problem.contains("database.xml"), "{problem}");
-    // The list is still read from MyLists; the Serato source joins this check with its reader.
+    // The list is still read from MyLists, and Serato's source is untouched.
     assert_eq!(source.playlists.len(), 1);
+    let serato = stick
+        .sources
+        .iter()
+        .find(|s| s.app == GuestApp::Serato)
+        .expect("a Serato source");
+    assert_eq!(serato.tracks.len(), 3);
 }
 
 #[test]
@@ -112,4 +118,85 @@ fn paths_on_another_mount_name_map_to_the_stick() {
         assert!(path.starts_with(&root), "{}", path.display());
         assert!(path.is_file());
     }
+}
+
+/// Writes `text` over the VirtualDJ list of a temp copy of the fixture and returns its root.
+fn stick_with_outside(dir: &Path, outside: &Path) -> PathBuf {
+    let root = dir.join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    let list = root
+        .join("VirtualDJ")
+        .join("MyLists")
+        .join("OJ VDJ A.vdjfolder");
+    let escape = root.join("..").join("outside.wav");
+    let mut text = fs::read_to_string(&list).unwrap();
+    let entry = |p: &Path| format!("<song path=\"{}\" />\n", p.display());
+    let extra = format!("{}{}", entry(outside), entry(&escape));
+    text = text.replace("</VirtualFolder>", &format!("{extra}</VirtualFolder>"));
+    fs::write(&list, text).unwrap();
+    let db = root.join("VirtualDJ").join("database.xml");
+    let mut text = fs::read_to_string(&db).unwrap();
+    let songs = format!(
+        "<Song FilePath=\"{}\"><Tags Title=\"Evil\" /></Song>\n<Song FilePath=\"{}\"><Tags Title=\"Evil2\" /></Song>\n",
+        outside.display(),
+        escape.display()
+    );
+    text = text.replace(
+        "</VirtualDJ_Database>",
+        &format!("{songs}</VirtualDJ_Database>"),
+    );
+    fs::write(&db, text).unwrap();
+    root
+}
+
+fn nothing_evil(source: &GuestSource) {
+    for track in &source.tracks {
+        let name = track.path.file_name().unwrap().to_string_lossy();
+        assert!(!name.starts_with("outside"), "{}", track.path.display());
+        assert_ne!(track.title.as_deref(), Some("Evil"));
+        assert_ne!(track.title.as_deref(), Some("Evil2"));
+    }
+}
+
+#[test]
+fn a_path_outside_the_stick_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.wav");
+    fs::copy(fixture().join("Serato").join("OJ Click 120.wav"), &outside).unwrap();
+    let root = stick_with_outside(dir.path(), &outside);
+    let stick = read_stick(&root, "OJGUEST");
+    let source = vdj(&stick);
+    nothing_evil(source);
+    assert_eq!(source.playlists[0].tracks.len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_out_of_the_stick_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.wav");
+    fs::copy(fixture().join("Serato").join("OJ Click 120.wav"), &outside).unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    let link = root.join("VirtualDJ tracks").join("outside link.wav");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let list = root
+        .join("VirtualDJ")
+        .join("MyLists")
+        .join("OJ VDJ A.vdjfolder");
+    let text = fs::read_to_string(&list).unwrap().replace(
+        "</VirtualFolder>",
+        &format!("<song path=\"{}\" />\n</VirtualFolder>", link.display()),
+    );
+    fs::write(&list, text).unwrap();
+    let stick = read_stick(&root, "OJGUEST");
+    let source = vdj(&stick);
+    assert!(
+        source
+            .tracks
+            .iter()
+            .all(|t| !t.path.ends_with("outside link.wav")),
+        "symlink read"
+    );
+    assert_eq!(source.playlists[0].tracks.len(), 3);
 }

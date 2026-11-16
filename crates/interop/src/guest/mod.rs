@@ -2,8 +2,9 @@
 //!
 //! Nothing here writes to the stick, and nothing read is added to the owner's library.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+mod serato;
 mod virtualdj;
 
 /// The app that prepared a stick's data.
@@ -75,7 +76,7 @@ pub struct GuestCue {
 type SourceReader = fn(&Path, &library::GuestMarkers) -> Option<GuestSource>;
 
 /// Every app's reader. A new app is one more entry; each checks its own marker.
-const READERS: &[SourceReader] = &[virtualdj::read];
+const READERS: &[SourceReader] = &[serato::read, virtualdj::read];
 
 /// Reads every app whose marker is on the stick. A failing app sets its source's `problem`
 /// and never stops the others.
@@ -106,4 +107,16 @@ fn track_from_tags(path: PathBuf) -> GuestTrack {
         main_cue: None,
         hotcues: Vec::new(),
     }
+}
+
+/// `path` when it is a file inside the stick at `root`, else `None`. A path with a `..`
+/// component, an absolute path elsewhere and a symlink out of the stick are all refused, so a
+/// crafted stick cannot make the app read the owner's own files as guest tracks.
+pub(crate) fn on_stick(root: &Path, path: &Path) -> Option<PathBuf> {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
+    }
+    let root = dunce::canonicalize(root).ok()?;
+    let real = dunce::canonicalize(path).ok()?;
+    (real.is_file() && real.starts_with(&root)).then(|| path.to_path_buf())
 }

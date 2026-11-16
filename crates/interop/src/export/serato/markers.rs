@@ -1,7 +1,9 @@
 //! Serato's cue tags (`Serato Markers2`, `Serato BeatGrid`) and its colour palette.
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::alphabet;
+use base64::engine::DecodePaddingMode;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 
 use super::super::ExportTrack;
 use super::super::timing::{App, app_seconds};
@@ -169,6 +171,90 @@ pub fn markers2_geob(t: &ExportTrack) -> Vec<u8> {
     }
     if out.len() < 470 {
         out.resize(470, 0);
+    }
+    out
+}
+
+/// A cue or saved loop read from a `Serato Markers2` tag, in the tag's own milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Marker {
+    Cue {
+        /// 0-based, as stored.
+        index: u8,
+        ms: u32,
+        rgb: u32,
+        name: String,
+    },
+    Loop {
+        index: u8,
+        start_ms: u32,
+        end_ms: u32,
+        name: String,
+    },
+}
+
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn name_at(b: &[u8], at: usize) -> String {
+    let rest = b.get(at..).unwrap_or_default();
+    let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
+    String::from_utf8_lossy(&rest[..end]).into_owned()
+}
+
+/// Reads the cues and loops of a `Serato Markers2` GEOB's data: `0x01 0x01`, then base64
+/// (padding optional, lines of any length) holding `0x01 0x01` and entries of
+/// `NAME\0`, a `u32` length and a body. Other entries and damaged ones are skipped.
+#[must_use]
+pub(crate) fn read_markers2(geob: &[u8]) -> Vec<Marker> {
+    let Some(text) = geob.strip_prefix(&[0x01, 0x01]) else {
+        return Vec::new();
+    };
+    let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+    let b64: Vec<u8> = text[..end]
+        .iter()
+        .copied()
+        .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
+        .collect();
+    let lenient = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let Ok(payload) = lenient.decode(&b64) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut at = 2;
+    while let Some(rest) = payload.get(at..).filter(|r| !r.is_empty() && r[0] != 0) {
+        let Some(nul) = rest.iter().position(|&c| c == 0) else {
+            break;
+        };
+        let name = &rest[..nul];
+        let Some(len) = u32_at(rest, nul + 1).map(|l| l as usize) else {
+            break;
+        };
+        let Some(body) = rest.get(nul + 5..).and_then(|r| r.get(..len)) else {
+            break;
+        };
+        at += nul + 5 + len;
+        match name {
+            b"CUE" if body.len() >= 12 => out.push(Marker::Cue {
+                index: body[1],
+                ms: u32_at(body, 2).unwrap_or(0),
+                rgb: u32::from_be_bytes([0, body[7], body[8], body[9]]),
+                name: name_at(body, 12),
+            }),
+            b"LOOP" if body.len() >= 10 => out.push(Marker::Loop {
+                index: body[1],
+                start_ms: u32_at(body, 2).unwrap_or(0),
+                end_ms: u32_at(body, 6).unwrap_or(0),
+                name: name_at(body, 20),
+            }),
+            _ => {}
+        }
     }
     out
 }
