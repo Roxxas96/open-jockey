@@ -13,7 +13,7 @@ use controller::Runtime;
 use engine::{
     ChannelCommand, Command, DeckId, EffectKind, EngineController, MasterCommand, SamplerCommand,
 };
-use ui::{HotcueMark, LibraryStep, UiCommand};
+use ui::{HotcueMark, JobKind, JobOp, LibraryStep, UiCommand};
 
 use super::frame::FrameParts;
 use super::import::Import;
@@ -81,6 +81,18 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
             }
             // The footer's pause, resume and stop. Jobs the session owns are routed here
             // too as they arrive.
+            UiCommand::Job {
+                kind: JobKind::Covers,
+                op,
+            } => {
+                if let Some(covers) = &parts.covers {
+                    match op {
+                        JobOp::Pause => covers.set_paused(true),
+                        JobOp::Resume => covers.set_paused(false),
+                        JobOp::Stop => covers.stop_until_next(),
+                    }
+                }
+            }
             UiCommand::Job { kind, op } => {
                 if let Some((_, _, Some(library))) = control.as_mut() {
                     library.job(kind, op);
@@ -95,6 +107,13 @@ pub(super) fn drain(commands: &Receiver<UiCommand>, parts: &mut FrameParts, mut 
         .unwrap_or_default()
     {
         parts.event(text);
+    }
+    // A library scan ends a stop of the cover lookups.
+    if let Some((_, _, Some(library))) = control.as_mut()
+        && library.take_scanned()
+        && let Some(covers) = &parts.covers
+    {
+        covers.resume();
     }
     if let Some((_, _, Some(library))) = control.as_mut() {
         for (track, slot) in library.take_failed_labels() {
@@ -226,6 +245,7 @@ fn library_step(
         LibraryStep::RetryMissingCovers => match library.retry_missing_covers() {
             Ok(()) => {
                 if let Some(covers) = &parts.covers {
+                    covers.resume();
                     covers.wake();
                 }
             }

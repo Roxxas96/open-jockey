@@ -133,6 +133,8 @@ pub struct LibraryMode {
     last_done: usize,
     watcher: Option<Watcher>,
     watch_scans: u64,
+    /// The watcher scanned since [`LibraryMode::take_scanned`] last said so.
+    scanned: bool,
     watch_skipped: u64,
     degraded_reported: bool,
     jobs: Option<Sender<Job>>,
@@ -275,6 +277,7 @@ impl LibraryMode {
             last_done: 0,
             watcher,
             watch_scans: 0,
+            scanned: false,
             watch_skipped: 0,
             degraded_reported: false,
             jobs: Some(jobs),
@@ -1126,6 +1129,11 @@ impl LibraryMode {
         jobs
     }
 
+    /// Whether the library was scanned since the last call.
+    pub fn take_scanned(&mut self) -> bool {
+        std::mem::take(&mut self.scanned)
+    }
+
     /// The footer's pause, resume or stop of a background job.
     ///
     /// A pause is the user's, in memory only, and holds until resumed (or the analysis
@@ -1174,6 +1182,7 @@ impl LibraryMode {
         let scans = watcher.scan_count();
         if scans != self.watch_scans {
             self.watch_scans = scans;
+            self.scanned = true;
             self.refresh_wanted = true;
             self.find_new_tracks = true;
         }

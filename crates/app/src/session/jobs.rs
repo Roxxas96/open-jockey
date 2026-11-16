@@ -85,13 +85,15 @@ impl Pace {
     }
 }
 
-/// The jobs the frame lists, ordered by kind: library mode's, then the session's own
-/// (none yet).
+/// The jobs the frame lists, ordered by kind: library mode's, the cover lookup's, then
+/// the session's own (none yet).
 pub(super) fn gather(
     library: Option<&crate::library_mode::LibraryMode>,
+    covers: Option<&crate::covers::CoverWorker>,
     now: Instant,
 ) -> Vec<JobView> {
     let mut jobs = library.map(|l| l.jobs(now)).unwrap_or_default();
+    jobs.extend(covers.and_then(|c| c.job(now)));
     jobs.sort_by_key(|job| job.kind);
     jobs
 }
@@ -139,6 +141,40 @@ pub(crate) fn analysis_job(facts: AnalysisFacts) -> Option<JobView> {
         can_stop: true,
         locked: None,
     })
+}
+
+/// What the covers pill needs to know.
+pub(crate) struct CoverFacts {
+    pub progress: crate::covers::CoverProgress,
+    /// The time left, once [`Pace`] can tell.
+    pub eta: Option<Duration>,
+}
+
+/// The covers pill for a pass that has work. A paused pass says so and gives no time
+/// left; one waiting for the network says that instead.
+pub(crate) fn covers_job(facts: CoverFacts) -> JobView {
+    let p = facts.progress;
+    JobView {
+        kind: JobKind::Covers,
+        label: "Fetching covers".to_owned(),
+        done: Some(p.done.min(p.total)),
+        total: Some(p.total),
+        eta: if p.paused || p.waiting_for_network {
+            None
+        } else {
+            facts.eta
+        },
+        state: if p.paused {
+            JobState::Paused
+        } else {
+            JobState::Running
+        },
+        current: p.current,
+        note: (p.waiting_for_network && !p.paused).then(|| "Waiting for the network".to_owned()),
+        can_pause: true,
+        can_stop: true,
+        locked: None,
+    }
 }
 
 #[cfg(test)]

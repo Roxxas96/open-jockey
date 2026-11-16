@@ -302,3 +302,18 @@ fn lookups_walk_the_library_and_ask_for_one_track() {
     assert_eq!(query.artist.as_deref(), Some("A"));
     assert_eq!(reader.cover_query(99).unwrap(), None);
 }
+
+#[test]
+fn counting_tracks_needing_covers_matches_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = open(&dir);
+    for id in 1..=4 {
+        add_track(&lib, id, Some("Artist"), Some("Title"));
+    }
+    let w = lib.writer();
+    w.submit_wait(WriteOp::MissCover { track: 1 }).unwrap();
+    w.submit_wait(WriteOp::MarkMissing(vec![4])).unwrap();
+    let reader = lib.reader().unwrap();
+    assert_eq!(reader.count_tracks_needing_covers(false).unwrap(), 2);
+    assert_eq!(reader.count_tracks_needing_covers(true).unwrap(), 3);
+}

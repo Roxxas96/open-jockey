@@ -253,7 +253,7 @@ impl FrameParts {
                     .unwrap_or_default(),
             })
         });
-        let jobs = jobs::gather(pass.library, Instant::now());
+        let jobs = jobs::gather(pass.library, self.covers.as_ref(), Instant::now());
         ControlFrame {
             jobs,
             control: pass.state.clone(),
