@@ -125,12 +125,18 @@ struct Shared {
     loaded: Mutex<Vec<i64>>,
     /// The jobs decks wait on, with one such deck each.
     job_decks: Mutex<Vec<(u64, DeckId)>>,
+    /// The user paused the queue: no separation starts (the one in flight finishes).
+    paused: AtomicBool,
+    /// A separation is running.
+    separating: AtomicBool,
 }
 
 /// A job's state, as the status line shows it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JobStatus {
-    /// Waiting for the cache lookup or its turn.
+    /// Waiting for the cache lookup, which may serve it without a separation.
+    Looking,
+    /// A cache miss, waiting for its turn.
     Queued,
     /// Waiting for the separator to open.
     PreparingModel,
@@ -170,6 +176,10 @@ struct JobEntry {
     sample_rate: u32,
     cancel: Arc<AtomicBool>,
     status: JobStatus,
+    /// The track's name, for the footer.
+    name: String,
+    /// The queue was stopped: the job is on its way out and no longer counts.
+    stopped: bool,
 }
 
 /// The control loop's side: queues jobs, cancels the ones no deck wants, and hands over
@@ -180,6 +190,8 @@ pub struct StemsControl {
     shared: Arc<Shared>,
     running: HashMap<u64, JobEntry>,
     next_id: u64,
+    /// Jobs of the current queue that finished (not counting a stopped queue's).
+    queue_done: usize,
     /// The last cache notice printed.
     last_notice: Option<String>,
     /// Closed when the thread ends.
@@ -254,6 +266,7 @@ impl StemsControl {
             shared,
             running: HashMap::new(),
             next_id: 0,
+            queue_done: 0,
             last_notice: None,
             finished,
         })
@@ -288,7 +301,9 @@ impl StemsControl {
                 frames: buffer.frames(),
                 sample_rate: buffer.sample_rate(),
                 cancel: Arc::clone(&cancel),
-                status: JobStatus::Queued,
+                status: JobStatus::Looking,
+                name: name.clone(),
+                stopped: false,
             },
         );
         let job = Job {
@@ -320,6 +335,58 @@ impl StemsControl {
         }
     }
 
+    /// How many separations of the current queue are done, and how many there are in all:
+    /// the tracks that missed the cache, finished or still waiting. `None` when none is
+    /// waiting or running (a cache hit is not a queue, and a stopped queue is gone).
+    pub fn queue_progress(&self) -> Option<(usize, usize)> {
+        let live = self.live().count();
+        (live > 0).then_some((self.queue_done, self.queue_done + live))
+    }
+
+    /// The separations still to run, a stopped queue's left out.
+    fn live(&self) -> impl Iterator<Item = &JobEntry> {
+        self.running
+            .values()
+            .filter(|j| !j.stopped && j.status != JobStatus::Looking)
+    }
+
+    /// The name of the track being separated now, if one is.
+    pub fn separating_name(&self) -> Option<&str> {
+        self.live()
+            .find(|j| matches!(j.status, JobStatus::Separating(_)))
+            .map(|j| j.name.as_str())
+    }
+
+    /// Whether the queue is paused.
+    pub fn paused(&self) -> bool {
+        self.shared.paused.load(Ordering::Relaxed)
+    }
+
+    /// Whether a separation is running (one the user paused around finishes first).
+    pub fn separating(&self) -> bool {
+        self.shared.separating.load(Ordering::Relaxed)
+    }
+
+    /// Pauses the queue, or resumes it: while paused nothing new is separated; the track
+    /// in flight finishes. Cache lookups go on, so loads from the cache stay quick.
+    pub fn pause(&mut self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Stops the queue: every separation waiting or running is cancelled (the one in
+    /// flight stops at its next chunk) and the queue does not come back. Decks waiting on
+    /// those jobs keep what they have.
+    pub fn stop_all(&mut self) {
+        for job in self.running.values_mut() {
+            if job.status != JobStatus::Looking {
+                job.stopped = true;
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.shared.paused.store(false, Ordering::Relaxed);
+        self.queue_done = 0;
+    }
+
     pub fn status(&self, id: u64) -> Option<JobStatus> {
         self.running.get(&id).map(|j| j.status)
     }
@@ -348,7 +415,16 @@ impl StemsControl {
     /// Forgets job `id` (its stems came, or it is over), returning its track if it was
     /// still running.
     pub fn finish(&mut self, id: u64) -> Option<i64> {
-        self.running.remove(&id).map(|j| j.track)
+        let job = self.running.remove(&id)?;
+        if !job.stopped && job.status != JobStatus::Looking {
+            self.queue_done += 1;
+        }
+        // The queue is over: the next one counts from nothing, and a pause ends with it.
+        if self.live().next().is_none() {
+            self.queue_done = 0;
+            self.shared.paused.store(false, Ordering::Relaxed);
+        }
+        Some(job.track)
     }
 
     /// The lines to print for `eviction`: its notice when it is a new one, and how many
@@ -414,7 +490,7 @@ impl StemsControl {
 /// nothing while it waits for the cache or its turn.
 pub fn status_text(status: Option<JobStatus>) -> Option<String> {
     match status? {
-        JobStatus::Queued => None,
+        JobStatus::Looking | JobStatus::Queued => None,
         JobStatus::PreparingModel => Some("stems: preparing model".to_owned()),
         JobStatus::Separating(done) => {
             // A fraction in [0, 1] as a whole percent, rounded down.
@@ -474,6 +550,7 @@ impl Worker {
             } else {
                 let wait = match self.model {
                     Model::Opening(_) => MODEL_POLL,
+                    _ if self.shared.paused.load(Ordering::Relaxed) => MODEL_POLL,
                     _ => Duration::ZERO,
                 };
                 match jobs.recv_timeout(wait) {
@@ -510,9 +587,13 @@ impl Worker {
                     let (job, _) = pending.pop_front().expect("a front job");
                     self.reply(Reply::Done(job.id));
                 }
+                // Paused: the queue waits, the cache lookups above go on.
+                Model::Ready(_) if self.shared.paused.load(Ordering::Relaxed) => {}
                 Model::Ready(_) => {
                     let (job, fingerprint) = pending.pop_front().expect("a front job");
+                    self.shared.separating.store(true, Ordering::Relaxed);
                     let misses = self.separate(job, &fingerprint, jobs);
+                    self.shared.separating.store(false, Ordering::Relaxed);
                     pending.extend(misses);
                 }
             }
