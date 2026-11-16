@@ -500,7 +500,9 @@ impl Default for ControlFrame {
 }
 
 impl ControlFrame {
-    /// The footer's message: the newest event while it shows, else the first status line.
+    /// The footer's message: the newest event while it shows, else the first deck line of
+    /// the status text. The browser line (the one starting with "▸") is never shown: the
+    /// footer's left side already says where the browser is.
     pub fn status_line(&self, now: Instant) -> &str {
         self.status_line_with(now, None)
     }
@@ -520,7 +522,12 @@ impl ControlFrame {
         newest
             .filter(|(at, _)| now.saturating_duration_since(*at) < EVENT_SHOWN)
             .map(|(_, text)| text)
-            .or_else(|| self.status.first().map(String::as_str))
+            .or_else(|| {
+                self.status
+                    .iter()
+                    .map(String::as_str)
+                    .find(|line| !line.trim().is_empty() && !line.starts_with('▸'))
+            })
             .unwrap_or("")
     }
 }
@@ -536,11 +543,13 @@ mod tests {
             status: vec!["▸ Music  1/3".into(), "Deck 1".into()],
             ..ControlFrame::default()
         };
-        assert_eq!(frame.status_line(start), "▸ Music  1/3");
+        assert_eq!(frame.status_line(start), "Deck 1");
         frame.events.push_back((start, "Deck 1 ◂ A – B".into()));
         assert_eq!(frame.status_line(start), "Deck 1 ◂ A – B");
         let later = start + EVENT_SHOWN;
-        assert_eq!(frame.status_line(later), "▸ Music  1/3");
+        assert_eq!(frame.status_line(later), "Deck 1");
+        frame.status.truncate(1);
+        assert_eq!(frame.status_line(later), "", "never the browser line");
         assert_eq!(ControlFrame::default().status_line(later), "");
     }
 

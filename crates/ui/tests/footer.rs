@@ -303,3 +303,121 @@ fn the_footer_stays_one_line_when_narrow() {
         "{message:?} runs into a pill at {first_pill}"
     );
 }
+
+#[test]
+fn the_import_while_writing_shows_disabled_buttons_with_why() {
+    // The import's pill while it writes, as the app publishes it.
+    let why = "The import is writing; it can't be stopped now.";
+    let frame = ControlFrame {
+        jobs: vec![JobView {
+            can_pause: false,
+            can_stop: false,
+            locked: Some(why),
+            ..job(JobKind::Import, "Writing playlists…")
+        }],
+        ..ControlFrame::default()
+    };
+    let (mut h, asked) = full(frame);
+    h.get_by_label("Pause Writing playlists…").click();
+    h.run_steps(2);
+    h.get_by_label("Stop Writing playlists…").click();
+    h.run_steps(2);
+    assert!(asked.try_iter().next().is_none());
+    h.get_by_label("Stop Writing playlists…").hover();
+    h.run_steps(4);
+    h.get_by_label(why);
+}
+
+#[test]
+fn resume_works_while_pausing() {
+    let frame = ControlFrame {
+        jobs: vec![JobView {
+            state: JobState::Pausing,
+            ..analysis()
+        }],
+        ..ControlFrame::default()
+    };
+    let (mut h, asked) = full(frame);
+    h.get_by_label("Resume Analysing").click();
+    h.run_steps(2);
+    assert_eq!(
+        asked.try_iter().collect::<Vec<_>>(),
+        [UiCommand::Job {
+            kind: JobKind::Analysis,
+            op: JobOp::Resume
+        }]
+    );
+}
+
+#[test]
+fn the_message_falls_back_to_a_deck_line_never_the_browser_line() {
+    let browser_line = "▸ Playlists ▸ Peak time  12/48   analyzing 0/0";
+    let frame = ControlFrame {
+        browser: Some(browser(48, Some(600.0))),
+        status: vec![
+            browser_line.into(),
+            ">Deck 1 < A - B".into(),
+            " Deck 2 < C - D".into(),
+        ],
+        ..ControlFrame::default()
+    };
+    let (h, _) = full(frame.clone());
+    let message = h.get_by_label(">Deck 1 < A - B");
+    assert!(
+        message.rect().min.y > 800.0,
+        "the deck line is in the footer"
+    );
+    assert!(h.query_by_label_contains("12/48").is_none());
+    // With no deck loaded there is only the browser line: the middle stays blank.
+    let alone = ControlFrame {
+        status: vec![browser_line.into()],
+        ..frame
+    };
+    let (h, _) = full(alone);
+    assert!(h.query_by_label_contains("12/48").is_none());
+}
+
+#[test]
+fn the_list_facts_follow_the_kind_of_list() {
+    let shows = |view: BrowserView, text: &str| {
+        let (h, _) = full(ControlFrame {
+            browser: Some(view),
+            ..ControlFrame::default()
+        });
+        h.get_by_label(text);
+    };
+    // A playlist is a playlist even before its length is known.
+    let mut playlist = browser(42, None);
+    playlist.path = "Playlists ▸ Midtempo Arsène".into();
+    playlist.playlist = Some(1);
+    shows(playlist, "Midtempo Arsène · 42 tracks");
+    // An exact hour has no minutes; the minutes are not zero-padded.
+    shows(
+        browser(3, Some(7_200.0)),
+        "Midtempo Arsène · 3 tracks · 2 h",
+    );
+    shows(
+        browser(3, Some(3_900.0)),
+        "Midtempo Arsène · 3 tracks · 1 h 5 min",
+    );
+    // The Playlists node lists nothing: no facts at all.
+    let node = BrowserView {
+        path: "Playlists".into(),
+        tree: vec![library::TreeRow {
+            label: "Playlists".into(),
+            depth: 0,
+            kind: library::TreeKind::Playlists,
+            expanded: true,
+            note: None,
+            playlist: None,
+            path: None,
+        }],
+        tree_cursor: 0,
+        ..browser(0, None)
+    };
+    let (h, _) = full(ControlFrame {
+        browser: Some(node),
+        ..ControlFrame::default()
+    });
+    assert!(h.query_by_label("0 files").is_none());
+}

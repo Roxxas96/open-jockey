@@ -93,7 +93,7 @@ fn render_the_footer() {
         },
         ui::JobView {
             kind: ui::JobKind::Covers,
-            label: "Finding covers".to_owned(),
+            label: "Fetching covers".to_owned(),
             done: Some(40),
             total: Some(220),
             eta: None,
