@@ -16,13 +16,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use library::{COVERS_RETRY_MISSED, CoverQuery, CoverState, Library, Reader, WriteOp, Writer};
 pub use service::{CoverService, LookupError};
+use ui::JobView;
+
+use crate::session::jobs::{CoverFacts, Pace, covers_job};
 
 /// The longest side of a cover kept, in pixels.
 pub const COVER_SIDE: u32 = 512;
@@ -71,8 +74,68 @@ enum Request {
     Wake,
 }
 
+/// Where a pass of lookups is, for the footer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverProgress {
+    /// Tracks looked up so far in the pass.
+    pub done: usize,
+    /// Tracks needing a cover when the pass began.
+    pub total: usize,
+    /// The track being looked up: "artist \u{2014} title", or the file name.
+    pub current: Option<String>,
+    /// The lookups wait for the network to come back.
+    pub waiting_for_network: bool,
+    /// The user paused the lookups.
+    pub paused: bool,
+}
+
+/// What the thread shares with the session, read without waiting on the lookups: atomics,
+/// and locks held for a moment.
+#[derive(Default)]
+struct Shared {
+    /// The user paused the background lookups (in memory only).
+    paused: AtomicBool,
+    /// The user stopped them, until a launch, a scan or "Retry missing covers".
+    stopped: AtomicBool,
+    /// After a network failure, until the pause is over.
+    waiting: AtomicBool,
+    done: AtomicUsize,
+    /// Zero between passes, and when a pass found nothing to look up.
+    total: AtomicUsize,
+    current: Mutex<Option<String>>,
+    pace: Mutex<Pace>,
+}
+
+impl Shared {
+    fn pace(&self) -> std::sync::MutexGuard<'_, Pace> {
+        self.pace.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn current(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.current.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A pass of `total` lookups begins.
+    fn begin(&self, total: usize) {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+        *self.current() = None;
+        *self.pace() = Pace::new();
+    }
+
+    /// One more track of the pass is finished.
+    fn advance(&self) {
+        let done = self.done.fetch_add(1, Ordering::Relaxed) + 1;
+        let total = self.total.load(Ordering::Relaxed);
+        if !self.paused.load(Ordering::Relaxed) && !self.waiting.load(Ordering::Relaxed) {
+            self.pace().sample(Instant::now(), done, total);
+        }
+    }
+}
+
 /// The lookups' thread, and how the session talks to it. Dropping it stops the thread.
 pub struct CoverWorker {
+    shared: Arc<Shared>,
     /// `library.cover_lookup`: lookups run only while it is set.
     enabled: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -128,7 +191,9 @@ impl CoverWorker {
         let (ended_tx, ended) = std::sync::mpsc::channel::<()>();
         let stop = Arc::new(AtomicBool::new(false));
         let removals = Removals::default();
+        let shared = Arc::new(Shared::default());
         let mut lookups = Lookups {
+            shared: Arc::clone(&shared),
             removals: Arc::clone(&removals),
             reader,
             writer: lib.writer(),
@@ -150,6 +215,7 @@ impl CoverWorker {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            shared,
             enabled: setting,
             stop,
             requests,
@@ -165,6 +231,59 @@ impl CoverWorker {
         if self.enabled.swap(on, Ordering::Relaxed) != on {
             self.wake();
         }
+    }
+
+    /// Pauses or resumes the background lookups. In memory only: a relaunch starts them
+    /// again. A paused worker makes no request until resumed, but "Find another cover"
+    /// still runs.
+    pub fn set_paused(&self, paused: bool) {
+        if self.shared.paused.swap(paused, Ordering::Relaxed) != paused {
+            if paused {
+                self.shared.pace().pause();
+            }
+            self.wake();
+        }
+    }
+
+    /// Ends the background lookups until the next launch, scan or [`CoverWorker::resume`]
+    /// ("Retry missing covers"). "Find another cover" still runs.
+    pub fn stop_until_next(&self) {
+        self.shared.paused.store(false, Ordering::Relaxed);
+        self.shared.stopped.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    /// Starts the background lookups again after [`CoverWorker::stop_until_next`].
+    pub fn resume(&self) {
+        if self.shared.stopped.swap(false, Ordering::Relaxed) {
+            self.wake();
+        }
+    }
+
+    /// Where the pass is, or `None` between passes, when it found nothing to look up and
+    /// after a stop. Never waits.
+    pub fn progress(&self) -> Option<CoverProgress> {
+        let total = self.shared.total.load(Ordering::Relaxed);
+        if total == 0 || self.shared.stopped.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(CoverProgress {
+            done: self.shared.done.load(Ordering::Relaxed).min(total),
+            total,
+            current: self.shared.current().clone(),
+            waiting_for_network: self.shared.waiting.load(Ordering::Relaxed),
+            paused: self.shared.paused.load(Ordering::Relaxed),
+        })
+    }
+
+    /// The footer's pill, while a pass has work.
+    pub fn job(&self, now: Instant) -> Option<JobView> {
+        let progress = self.progress()?;
+        let eta = (!progress.paused && !progress.waiting_for_network)
+            .then(|| self.shared.pace().eta(now))
+            .flatten()
+            .map(|left| Duration::from_secs(left.as_secs_f64().round() as u64));
+        Some(covers_job(CoverFacts { progress, eta }))
     }
 
     /// Looks `track` up now, for another cover than the one it has (or after a miss, or a
@@ -226,6 +345,7 @@ impl Drop for CoverWorker {
 /// The lookups' thread state. Its writes wait to be committed, so the next batch read
 /// from the library already leaves out the tracks just looked up.
 struct Lookups {
+    shared: Arc<Shared>,
     reader: Reader,
     writer: Writer,
     /// The library's database file: the covers folder is next to it.
@@ -283,6 +403,16 @@ impl Lookups {
                 self.wait(self.timing.idle_poll);
                 continue;
             }
+            if self.shared.paused.load(Ordering::Relaxed)
+                || self.shared.stopped.load(Ordering::Relaxed)
+            {
+                // A pass not begun is counted again, so a pause shows the work waiting.
+                if pass.after.is_none() {
+                    pass = self.new_pass();
+                }
+                self.wait(self.timing.idle_poll);
+                continue;
+            }
             if let Some(until) = self.paused_until {
                 let now = Instant::now();
                 if until > now {
@@ -290,6 +420,7 @@ impl Lookups {
                     continue;
                 }
                 self.paused_until = None;
+                self.shared.waiting.store(false, Ordering::Relaxed);
             }
             let batch = match self.reader.tracks_needing_covers_after(
                 pass.after.unwrap_or(i64::MIN),
@@ -312,7 +443,7 @@ impl Lookups {
                 continue;
             }
             for query in batch {
-                if self.stopped() || !self.enabled.load(Ordering::Relaxed) {
+                if self.stopped() || !self.background_on() {
                     break;
                 }
                 self.answer_requests();
@@ -323,10 +454,17 @@ impl Lookups {
                     .get(&query.track)
                     .is_some_and(|at| *at > Instant::now())
                 {
+                    self.shared.advance();
                     continue;
                 }
                 pass.looked_up += 1;
-                if !self.look_up(&query) {
+                *self.shared.current() = Some(label(&query));
+                let went = self.look_up(&query);
+                *self.shared.current() = None;
+                if went {
+                    self.shared.advance();
+                }
+                if !went {
                     // A retry goes on from this track once the pause is over, not from the
                     // first missed track again.
                     if pass.retrying {
@@ -338,6 +476,10 @@ impl Lookups {
                 // Turned off midway: this track is looked up again when they are back on.
                 if !self.go_on() {
                     pass.after = before;
+                    break;
+                }
+                // Paused or stopped midway: the track in flight was recorded.
+                if !self.background_on() {
                     break;
                 }
             }
@@ -369,14 +511,21 @@ impl Lookups {
     fn new_pass(&mut self) -> Pass {
         let now = Instant::now();
         self.later.retain(|_, at| *at > now);
+        let retrying = self
+            .reader
+            .setting(COVERS_RETRY_MISSED)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
+        // The total is counted once, when the pass starts.
+        let total = self
+            .reader
+            .count_tracks_needing_covers(retrying)
+            .unwrap_or(0);
+        self.shared.begin(total);
         Pass {
-            retrying: self
-                .reader
-                .setting(COVERS_RETRY_MISSED)
-                .ok()
-                .flatten()
-                .as_deref()
-                == Some("1"),
+            retrying,
             ..Pass::default()
         }
     }
@@ -384,6 +533,7 @@ impl Lookups {
     /// A pass that retried the missed tracks clears the retry flag: they were all looked up
     /// again (a network failure holds the pass at its track until the pause is over).
     fn end_pass(&self, pass: &Pass) {
+        self.shared.total.store(0, Ordering::Relaxed);
         if pass.retrying {
             let _ = self.writer.submit_wait(WriteOp::SetSetting {
                 key: COVERS_RETRY_MISSED.to_owned(),
@@ -480,6 +630,14 @@ impl Lookups {
         }
     }
 
+    /// Whether the background lookups may make a request: on, not stopping, not paused and
+    /// not stopped by the user. "Find another cover" asks only [`Lookups::go_on`].
+    fn background_on(&self) -> bool {
+        self.go_on()
+            && !self.shared.paused.load(Ordering::Relaxed)
+            && !self.shared.stopped.load(Ordering::Relaxed)
+    }
+
     /// Whether the lookups may go on: on, and not stopping.
     fn go_on(&self) -> bool {
         self.enabled.load(Ordering::Relaxed) && !self.stopped()
@@ -570,6 +728,8 @@ impl Lookups {
         self.later.insert(track, now + self.timing.retry_later);
         if e.is_unreachable() {
             self.paused_until = Some(now + self.timing.offline_pause);
+            self.shared.waiting.store(true, Ordering::Relaxed);
+            self.shared.pace().pause();
             return false;
         }
         true
@@ -615,6 +775,15 @@ impl Lookups {
                 ));
             }
         }
+    }
+}
+
+/// What the footer says of the track being looked up: "artist \u{2014} title", or the file
+/// name without its extension.
+fn label(query: &CoverQuery) -> String {
+    match (&query.artist, &query.title) {
+        (Some(artist), Some(title)) => format!("{artist} \u{2014} {title}"),
+        _ => query.file_stem.clone(),
     }
 }
 
@@ -1358,6 +1527,7 @@ pub(crate) mod tests {
         let (_requests, incoming) = std::sync::mpsc::sync_channel(1);
         let (events, _events) = std::sync::mpsc::channel();
         let lookups = Lookups {
+            shared: Arc::default(),
             reader: lib.reader().unwrap(),
             writer: lib.writer(),
             db: db(&dir),
@@ -1444,5 +1614,137 @@ pub(crate) mod tests {
         assert!(shrink(&png_sized(9000, 8, [1, 2, 3])).is_err());
         assert!(shrink(b"<html>not a picture</html>").is_err());
         assert!(shrink(&[]).is_err());
+    }
+
+    fn progress_of(worker: &CoverWorker) -> Option<CoverProgress> {
+        worker.progress()
+    }
+
+    fn tracks(dir: &tempfile::TempDir, lib: &Library, n: i64) {
+        for id in 1..=n {
+            add_track(
+                lib,
+                id,
+                Some(("Artist", "Title")),
+                &song(dir, &format!("{id}.mp3")),
+            );
+        }
+    }
+
+    #[test]
+    fn a_pass_reports_done_of_its_starting_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        tracks(&dir, &lib, 3);
+        let (service, fake) = FakeService::boxed(Answer::Nothing, Duration::from_millis(400));
+        let worker = CoverWorker::start_with(&lib, service, on(), fast()).unwrap();
+        wait_until("the second lookup", || fake.calls() == 2);
+        let p = progress_of(&worker).unwrap();
+        assert_eq!((p.done, p.total), (1, 3));
+        assert_eq!(p.current.as_deref(), Some("Artist \u{2014} Title"));
+        assert!(!p.paused && !p.waiting_for_network);
+        // A track added meanwhile does not move the total.
+        add_track(&lib, 9, Some(("A", "B")), &song(&dir, "9.mp3"));
+        assert_eq!(progress_of(&worker).map(|p| p.total), Some(3));
+        wait_until("the pass ends", || progress_of(&worker).is_none());
+    }
+
+    #[test]
+    fn a_paused_lookup_makes_no_request_until_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        let http = Arc::new(service::tests::RecordingHttp::default());
+        let service = service::Chain(vec![Box::new(service::DeezerService::new(
+            Arc::clone(&http) as Arc<dyn service::Http>,
+            Duration::ZERO,
+        ))]);
+        let worker = CoverWorker::start_with(&lib, Box::new(service), on(), fast()).unwrap();
+        worker.set_paused(true);
+        tracks(&dir, &lib, 2);
+        wait_until("the pill", || {
+            progress_of(&worker).is_some_and(|p| p.paused)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(http.asked().is_empty(), "{:?}", http.asked());
+        let job = worker.job(Instant::now()).unwrap();
+        assert_eq!(job.state, ui::JobState::Paused);
+        assert_eq!((job.done, job.total, job.eta), (Some(0), Some(2), None));
+        worker.set_paused(false);
+        wait_until("a request", || !http.asked().is_empty());
+    }
+
+    #[test]
+    fn offline_shows_waiting_for_network_without_an_eta() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        tracks(&dir, &lib, 3);
+        let offline = Answer::Fail(LookupError::Unreachable("offline".into()));
+        let (service, fake) = FakeService::boxed(offline, Duration::ZERO);
+        let worker = CoverWorker::start_with(&lib, service, on(), fast()).unwrap();
+        wait_until("waiting", || {
+            progress_of(&worker).is_some_and(|p| p.waiting_for_network)
+        });
+        let job = worker
+            .job(Instant::now() + Duration::from_secs(600))
+            .unwrap();
+        assert_eq!(job.eta, None);
+        assert_eq!(job.note.as_deref(), Some("Waiting for the network"));
+        assert_eq!(job.state, ui::JobState::Running);
+        // No other request is made while it waits.
+        let calls = fake.calls();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(fake.calls(), calls);
+    }
+
+    #[test]
+    fn stop_ends_lookups_until_a_retry_or_a_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        tracks(&dir, &lib, 6);
+        let (service, fake) = FakeService::boxed(Answer::Nothing, Duration::from_millis(200));
+        let worker = CoverWorker::start_with(&lib, service, on(), fast()).unwrap();
+        wait_until("a lookup", || fake.calls() >= 1);
+        worker.stop_until_next();
+        std::thread::sleep(Duration::from_millis(400));
+        let calls = fake.calls();
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(fake.calls(), calls, "no lookup after a stop");
+        assert!(progress_of(&worker).is_none() && worker.job(Instant::now()).is_none());
+        worker.resume();
+        wait_until("lookups again", || fake.calls() > calls);
+    }
+
+    #[test]
+    fn find_another_cover_runs_while_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        let (service, fake) =
+            FakeService::boxed(Answer::Pictures(vec![png(64, [9, 9, 9])]), Duration::ZERO);
+        let worker = CoverWorker::start_with(&lib, service, on(), fast()).unwrap();
+        worker.set_paused(true);
+        tracks(&dir, &lib, 1);
+        worker.find_now(1).unwrap();
+        wait_until("found", || state(&lib, 1) == Some(CoverState::Found));
+        assert_eq!(fake.calls(), 1);
+        // And stopped.
+        worker.stop_until_next();
+        add_track(&lib, 2, Some(("A", "B")), &song(&dir, "2.mp3"));
+        worker.find_now(2).unwrap();
+        wait_until("found 2", || state(&lib, 2) == Some(CoverState::Found));
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[test]
+    fn no_pill_when_nothing_needs_a_cover() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        let (service, fake) = FakeService::boxed(Answer::Nothing, Duration::ZERO);
+        let worker = CoverWorker::start_with(&lib, service, on(), fast()).unwrap();
+        for _ in 0..6 {
+            assert!(progress_of(&worker).is_none());
+            assert!(worker.job(Instant::now()).is_none());
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        assert_eq!(fake.calls(), 0);
     }
 }

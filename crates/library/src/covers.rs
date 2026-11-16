@@ -104,6 +104,25 @@ impl Reader {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// How many tracks [`Reader::tracks_needing_covers_after`] would give in all, with the
+    /// missed ones when `retrying`: the total of a lookup pass.
+    ///
+    /// # Errors
+    ///
+    /// Any database error.
+    pub fn count_tracks_needing_covers(&self, retrying: bool) -> Result<usize, LibraryError> {
+        let count: i64 = self
+            .connection()
+            .prepare_cached(
+                "SELECT COUNT(*) FROM tracks t \
+             LEFT JOIN covers c ON c.track_id = t.id \
+             WHERE t.missing = 0 \
+                 AND (c.track_id IS NULL OR (c.state = 'missed' AND ?1))",
+            )?
+            .query_row([retrying], |r| r.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
     /// What a lookup of `track`'s cover would send, whatever its cover's state; `None`
     /// when there is no such track.
     ///
