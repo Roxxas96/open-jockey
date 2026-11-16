@@ -566,6 +566,102 @@ mod tests {
         assert!(began.elapsed() < Duration::from_millis(1500));
     }
 
+    /// A worker on a library of one track, with a service that answers `Nothing` slowly
+    /// enough to count its requests, stopped through the footer's command.
+    fn stopped_covers(
+        dir: &tempfile::TempDir,
+        parts: &mut FrameParts,
+        library: &mut LibraryMode,
+    ) -> std::sync::Arc<crate::covers::tests::FakeState> {
+        use crate::covers::tests::{Answer, FakeService, add_track, song, wait_until};
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        let lib = library.library();
+        for id in 1..=3 {
+            add_track(&lib, id, Some(("A", "T")), &song(dir, &format!("{id}.mp3")));
+        }
+        let (service, fake) = FakeService::boxed(Answer::Nothing, Duration::from_millis(100));
+        let setting = Arc::new(AtomicBool::new(true));
+        parts.covers = Some(
+            crate::covers::CoverWorker::start_with(
+                &lib,
+                service,
+                setting,
+                crate::covers::Timing {
+                    offline_pause: Duration::from_secs(2),
+                    idle_poll: Duration::from_millis(50),
+                    retry_later: Duration::from_secs(600),
+                },
+            )
+            .unwrap(),
+        );
+        wait_until("a lookup", || fake.calls() >= 1);
+        parts.covers.as_ref().unwrap().stop_until_next();
+        std::thread::sleep(Duration::from_millis(400));
+        let calls = fake.calls();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(fake.calls(), calls, "stopped");
+        fake
+    }
+
+    #[test]
+    fn a_library_scan_lifts_a_cover_stop() {
+        use crate::covers::tests::wait_until;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let config = Config::default();
+        let mut library = testing::start(&dir.path().join("library.sqlite3"));
+        let mut parts = FrameParts::new(&config);
+        parts.set_settings(Settings::load(path, &config));
+        let fake = stopped_covers(&dir, &mut parts, &mut library);
+        let calls = fake.calls();
+        let mapping = controller::builtin::load_mapping_from("ddj-sb3", None).unwrap();
+        let mut runtime = Runtime::new(mapping);
+        let (mut engine, _renderer) = engine::engine(engine::EngineConfig {
+            sample_rate: 44_100,
+            max_block_frames: 512,
+        });
+        library.note_scanned();
+        let (_tx, rx) = channel();
+        drain(
+            &rx,
+            &mut parts,
+            Some((&mut runtime, &mut engine, Some(&mut library))),
+        );
+        wait_until("lookups again", || fake.calls() > calls);
+    }
+
+    #[test]
+    fn retry_missing_covers_lifts_a_cover_stop() {
+        use crate::covers::tests::wait_until;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let config = Config::default();
+        let mut library = testing::start(&dir.path().join("library.sqlite3"));
+        let mut parts = FrameParts::new(&config);
+        parts.set_settings(Settings::load(path, &config));
+        let fake = stopped_covers(&dir, &mut parts, &mut library);
+        let calls = fake.calls();
+        let mapping = controller::builtin::load_mapping_from("ddj-sb3", None).unwrap();
+        let mut runtime = Runtime::new(mapping);
+        let (mut engine, _renderer) = engine::engine(engine::EngineConfig {
+            sample_rate: 44_100,
+            max_block_frames: 512,
+        });
+        let (tx, rx) = channel();
+        tx.send(UiCommand::Library(LibraryStep::RetryMissingCovers))
+            .unwrap();
+        drain(
+            &rx,
+            &mut parts,
+            Some((&mut runtime, &mut engine, Some(&mut library))),
+        );
+        wait_until("lookups again", || fake.calls() > calls);
+    }
+
     #[test]
     fn settings_are_saved_and_the_live_ones_applied() {
         let dir = tempfile::tempdir().unwrap();
