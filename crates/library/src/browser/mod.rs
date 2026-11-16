@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use actions::BrowserRequest;
-pub use drives::{Drive, drives};
+pub use drives::{Drive, GuestMarkers, drives, guest_markers};
 pub use tree::{TreeKind, TreeRow};
 
 use crate::scan::{is_hidden, is_supported, normalize_path};

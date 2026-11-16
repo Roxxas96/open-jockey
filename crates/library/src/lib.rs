@@ -25,7 +25,7 @@ mod writer;
 
 pub use browser::{
     BROWSER_PAGE_ROWS, Browser, BrowserEdit, BrowserRequest, BrowserView, Drive, Focus,
-    ListIdentity, ListRow, TreeKind, TreeRow, drives, remix_of,
+    GuestMarkers, ListIdentity, ListRow, TreeKind, TreeRow, drives, guest_markers, remix_of,
 };
 pub use covers::{COVERS_RETRY_MISSED, CoverQuery, CoverRow, CoverState, cover_files};
 pub use cues::HotcuePoint;
@@ -94,6 +94,8 @@ pub enum LibraryError {
     NoSuchPlaylist(i64),
     #[error("track {0} does not exist")]
     NoSuchTrack(i64),
+    #[error("track {0} is a guest track; it is never saved to the library")]
+    GuestTrack(i64),
     #[error("{0} is not a valid cue point: it must be finite and not negative")]
     InvalidCue(f64),
     #[error("{0} is not a valid loop length: it must be finite and above zero")]
