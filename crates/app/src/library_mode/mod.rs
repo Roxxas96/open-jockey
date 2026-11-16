@@ -3065,6 +3065,65 @@ mod tests {
         (source, calls, entered, release)
     }
 
+    /// Separates once told: says it `entered`, calls `progress` only when sent `true` (a
+    /// chunk, when newly asked-for tracks are looked up), finishes when sent `false`, and
+    /// ends `Cancelled` as soon as its cancel flag is set.
+    struct Chunky {
+        calls: Arc<AtomicUsize>,
+        entered: std::sync::mpsc::Sender<()>,
+        steps: std::sync::mpsc::Receiver<bool>,
+    }
+
+    impl stems::Separator for Chunky {
+        fn separate(
+            &mut self,
+            track: &engine::TrackBuffer,
+            progress: &dyn Fn(f32),
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> Result<engine::StemSet, stems::SeparateError> {
+            self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let _ = self.entered.send(());
+            loop {
+                if cancel.load(AtomicOrdering::Relaxed) {
+                    return Err(stems::SeparateError::Cancelled);
+                }
+                match self.steps.recv_timeout(Duration::from_millis(2)) {
+                    Ok(true) => progress(0.5),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            }
+            stems::SyntheticSeparator::new().separate(
+                track,
+                &|_| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        }
+    }
+
+    impl StemSeparator for Chunky {}
+
+    /// A [`Chunky`] separator, with its run counter, the `entered` signal and the steps.
+    fn chunky() -> (
+        SeparatorSource,
+        Arc<AtomicUsize>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<bool>,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered) = channel();
+        let (steps, steps_rx) = channel();
+        let counter = Arc::clone(&calls);
+        let source = SeparatorSource::Open(Box::new(move || {
+            Ok(Box::new(Chunky {
+                calls: counter,
+                entered: entered_tx,
+                steps: steps_rx,
+            }) as Box<dyn StemSeparator>)
+        }));
+        (source, calls, entered, steps)
+    }
+
     fn setup(separator: SeparatorSource) -> StemsSetup {
         StemsSetup {
             budget_bytes: 1_000_000_000,
@@ -3329,6 +3388,80 @@ mod tests {
         });
         mode.shutdown(&mut engine, &printer);
         printer.finish();
+    }
+
+    /// Track 7 separating (held between chunks), track 8 asked for on deck 2 and not yet
+    /// looked up (no chunk has come), then Stop. Track 8 is cached when `cached`.
+    fn stop_with_a_track_still_being_looked_up(
+        cached: bool,
+    ) -> (usize, bool, bool, Option<JobView>) {
+        let (source, calls, entered, steps) = chunky();
+        let track = short_track();
+        let set = stems::SyntheticSeparator::new()
+            .separate(&track, &|_| {}, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let (_dir, mut mode, mut engine, mut renderer, printer, _events) =
+            stems_mode(Some(setup(source)), |lib| {
+                if cached {
+                    let dir = crate::library_cmd::stems_dir(lib.path());
+                    let mut cache = library::StemCache::new(lib, dir, 1_000_000_000).unwrap();
+                    let key = library::StemKey {
+                        track: 8,
+                        fingerprint: &[0],
+                        sample_rate: 44_100,
+                        frames: 4410,
+                    };
+                    cache.put(&key, &set, false, &[]).unwrap();
+                }
+            });
+        load_track(&mut mode, 0, 7, short_track(), &mut engine, &printer);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |_, _| {
+            entered.try_recv().is_ok()
+        });
+        load_track(&mut mode, 1, 8, track, &mut engine, &printer);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            matches!(
+                m.decks[1].as_ref().map(|t| &t.stems),
+                Some(DeckStems::Job(_))
+            )
+        });
+        mode.job(JobKind::Stems, JobOp::Stop);
+        // The next chunk, then the end of the separation, were it not cancelled.
+        steps.send(true).unwrap();
+        steps.send(false).unwrap();
+        let mut pill = None;
+        for _ in 0..150 {
+            render(&mut renderer);
+            mode.poll(Instant::now(), &mut engine, &printer);
+            pill = pill.or_else(|| stems_pill(&mode));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let result = (
+            calls.load(AtomicOrdering::Relaxed),
+            engine.deck(DeckId::new(0).unwrap()).stems,
+            engine.deck(DeckId::new(1).unwrap()).stems,
+            pill,
+        );
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+        result
+    }
+
+    #[test]
+    fn a_track_asked_for_just_before_stop_does_not_start_a_new_queue() {
+        let (calls, first, second, pill) = stop_with_a_track_still_being_looked_up(false);
+        assert_eq!(calls, 1, "the separator ran once");
+        assert!(!first && !second, "no stems reached a deck");
+        assert!(pill.is_none(), "no pill came back: {pill:?}");
+    }
+
+    #[test]
+    fn a_stopped_track_still_being_looked_up_still_gets_its_cached_stems() {
+        let (calls, first, second, pill) = stop_with_a_track_still_being_looked_up(true);
+        assert_eq!(calls, 1);
+        assert!(!first, "the stopped separation gave nothing");
+        assert!(second, "the cache hit was served");
+        assert!(pill.is_none(), "{pill:?}");
     }
 
     #[test]
