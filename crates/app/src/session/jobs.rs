@@ -52,6 +52,12 @@ impl Pace {
         }
     }
 
+    /// How many samples the measure holds.
+    #[cfg(test)]
+    pub fn samples(&self) -> usize {
+        self.samples.len()
+    }
+
     /// The job is paused: its samples are dropped and there is no time left to give until
     /// it is sampled again, so the pause is not counted as slowness.
     pub fn pause(&mut self) {

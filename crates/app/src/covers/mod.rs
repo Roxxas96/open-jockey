@@ -376,6 +376,13 @@ struct Pass {
     retrying: bool,
     /// How many lookups the pass made.
     looked_up: usize,
+    /// The tracks it has to go through, counted when it began.
+    total: usize,
+    /// The total is shown: from the pass's first lookup (or a pause before it). A pass
+    /// that only skips the tracks put off for later shows nothing, so no pill flashes.
+    shown: bool,
+    /// Tracks put off for later that the pass skipped before its total was shown.
+    skipped: usize,
 }
 
 /// What a track's file says before any request.
@@ -421,8 +428,9 @@ impl Lookups {
                 || self.shared.stopped.load(Ordering::Relaxed)
             {
                 // A pass not begun is counted again, so a pause shows the work waiting.
-                if pass.after.is_none() {
+                if pass.after.is_none() || !pass.shown {
                     pass = self.new_pass();
+                    self.show(&mut pass);
                 }
                 self.wait(self.timing.idle_poll);
                 continue;
@@ -468,9 +476,14 @@ impl Lookups {
                     .get(&query.track)
                     .is_some_and(|at| *at > Instant::now())
                 {
-                    self.shared.advance();
+                    if pass.shown {
+                        self.shared.advance();
+                    } else {
+                        pass.skipped += 1;
+                    }
                     continue;
                 }
+                self.show(&mut pass);
                 pass.looked_up += 1;
                 *self.shared.current() = Some(label(&query));
                 let went = self.look_up(&query);
@@ -539,7 +552,7 @@ impl Lookups {
             .flatten()
             .as_deref()
             == Some("1");
-        // The total is counted once, when the pass starts.
+        // The total is counted once, when the pass starts, and shown from its first lookup.
         let total = self
             .reader
             .count_tracks_needing_covers(retrying)
@@ -549,10 +562,20 @@ impl Lookups {
                 ));
                 0
             });
-        self.shared.begin(total);
+        self.shared.begin(0);
         Pass {
             retrying,
+            total,
             ..Pass::default()
+        }
+    }
+
+    /// Shows `pass`'s total in the pill, with the tracks it skipped so far as done.
+    fn show(&self, pass: &mut Pass) {
+        if !pass.shown {
+            pass.shown = true;
+            self.shared.begin(pass.total);
+            self.shared.done.store(pass.skipped, Ordering::Relaxed);
         }
     }
 
@@ -1773,6 +1796,26 @@ pub(crate) mod tests {
         worker.find_now(2).unwrap();
         wait_until("found 2", || state(&lib, 2) == Some(CoverState::Found));
         assert_eq!(fake.calls(), 2);
+    }
+
+    /// A pass that only skips tracks put off for later (here one on an unplugged drive)
+    /// shows no pill: it would flash at every pass.
+    #[test]
+    fn no_pill_for_a_pass_of_tracks_put_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        let away = dir.path().join("Unplugged").join("song.mp3");
+        add_track(&lib, 1, Some(("Away", "Song")), away.to_str().unwrap());
+        let (service, fake) = FakeService::boxed(Answer::Nothing, Duration::ZERO);
+        let worker = CoverWorker::start_with(&lib, service, on(), fast()).unwrap();
+        // The first pass reads the file and puts the track off.
+        std::thread::sleep(Duration::from_millis(300));
+        // The passes after it, one every 50 ms, only skip it.
+        let until = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < until {
+            assert!(worker.job(Instant::now()).is_none(), "the pill flashed");
+        }
+        assert_eq!(fake.calls(), 0);
     }
 
     #[test]

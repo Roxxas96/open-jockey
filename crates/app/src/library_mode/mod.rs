@@ -144,6 +144,9 @@ pub struct LibraryMode {
     stems: Option<StemsControl>,
     /// The time left of the stems queue.
     stems_pace: Pace,
+    /// The queue's done and total when [`LibraryMode::stems_pace`] was last sampled: it
+    /// is sampled again only once they move, not at every round of the control loop.
+    stems_sampled: Option<(usize, usize)>,
     decks: [Option<DeckTrack>; 4],
     /// The track each deck held before its latest `Load`, still saved until the engine
     /// applies the load that replaced it: until the deck's `load_seq` passes the second
@@ -287,6 +290,7 @@ impl LibraryMode {
             worker: Some(worker),
             stems,
             stems_pace: Pace::new(),
+            stems_sampled: None,
             decks: [None, None, None, None],
             outgoing: [None, None, None, None],
             engine_loads: [0; 4],
@@ -1176,6 +1180,7 @@ impl LibraryMode {
                     JobOp::Stop => {
                         stems.stop_all();
                         self.stems_pace = Pace::new();
+                        self.stems_sampled = None;
                     }
                 }
                 self.dirty = true;
@@ -1280,14 +1285,19 @@ impl LibraryMode {
         }
         // The pace of the queue, for the pill's time left.
         match self.stems.as_ref().and_then(StemsControl::queue_progress) {
-            Some((done, total)) => {
-                if self.stems.as_ref().is_some_and(StemsControl::paused) {
-                    self.stems_pace.pause();
-                } else {
-                    self.stems_pace.sample(Instant::now(), done, total);
-                }
+            Some(_) if self.stems.as_ref().is_some_and(StemsControl::paused) => {
+                self.stems_pace.pause();
+                self.stems_sampled = None;
             }
-            None => self.stems_pace = Pace::new(),
+            Some(now) if self.stems_sampled != Some(now) => {
+                self.stems_pace.sample(Instant::now(), now.0, now.1);
+                self.stems_sampled = Some(now);
+            }
+            Some(_) => {}
+            None => {
+                self.stems_pace = Pace::new();
+                self.stems_sampled = None;
+            }
         }
     }
 
@@ -1528,7 +1538,8 @@ impl LibraryMode {
     ) -> Vec<String> {
         let mut lines = vec![browser_line(self.browser.as_ref(), self.notation)];
         // The window shows the analysis as a footer pill; the terminal has no footer.
-        if let Some(pill) = self.jobs(Instant::now()).first() {
+        let jobs = self.jobs(Instant::now());
+        if let Some(pill) = jobs.iter().find(|j| j.kind == JobKind::Analysis) {
             let state = match pill.state {
                 ui::JobState::Running => "",
                 ui::JobState::Pausing => " (pausing)",
@@ -2570,7 +2581,9 @@ mod tests {
     }
 
     fn analysis_pill(mode: &LibraryMode) -> Option<JobView> {
-        mode.jobs(Instant::now()).into_iter().next()
+        mode.jobs(Instant::now())
+            .into_iter()
+            .find(|j| j.kind == JobKind::Analysis)
     }
 
     #[test]
@@ -3385,6 +3398,84 @@ mod tests {
         release.send(()).unwrap();
         run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
             idle(m)
+        });
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn the_terminal_status_shows_no_analysis_for_a_stems_queue() {
+        let (_dir, mut mode, mut engine, _renderer, printer, _calls, _entered, _release) =
+            two_in_the_queue();
+        mode.job(JobKind::Analysis, JobOp::Stop);
+        assert!(analysis_pill(&mode).is_none());
+        assert!(stems_pill(&mode).is_some());
+        let slots = [[engine::EffectKind::Echo; 3]; 4];
+        let line = mode.status_lines(&engine, &slots).remove(0);
+        assert!(!line.contains("analyzing"), "{line}");
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn a_pause_with_no_stems_queue_is_ignored() {
+        let (source, _calls, _entered, _release) = held();
+        let (_dir, mut mode, mut engine, _renderer, printer, _events) =
+            stems_mode(Some(setup(source)), |_| {});
+        assert_eq!(progress(&mode), None);
+        // A pause that lands as the queue ends must not hold the next queue.
+        mode.job(JobKind::Stems, JobOp::Pause);
+        assert!(!mode.stems.as_ref().unwrap().paused());
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn the_stems_pace_is_sampled_only_when_the_queue_moves() {
+        let (_dir, mut mode, mut engine, mut renderer, printer, _calls, _entered, _release) =
+            two_in_the_queue();
+        for _ in 0..50 {
+            render(&mut renderer);
+            mode.poll(Instant::now(), &mut engine, &printer);
+        }
+        assert_eq!(progress(&mode), Some((0, 2)));
+        assert!(
+            mode.stems_pace.samples() <= 1,
+            "{} samples of an unmoved queue",
+            mode.stems_pace.samples()
+        );
+        mode.shutdown(&mut engine, &printer);
+        printer.finish();
+    }
+
+    #[test]
+    fn a_track_asked_for_again_after_stop_is_separated() {
+        let (source, calls, entered, steps) = chunky();
+        let track = short_track();
+        let (_dir, mut mode, mut engine, mut renderer, printer, _events) =
+            stems_mode(Some(setup(source)), |_| {});
+        load_track(&mut mode, 0, 7, short_track(), &mut engine, &printer);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |_, _| {
+            entered.try_recv().is_ok()
+        });
+        // Track 8 is still being looked up when the queue is stopped.
+        load_track(&mut mode, 1, 8, Arc::clone(&track), &mut engine, &printer);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            matches!(
+                m.decks[1].as_ref().map(|t| &t.stems),
+                Some(DeckStems::Job(_))
+            )
+        });
+        mode.job(JobKind::Stems, JobOp::Stop);
+        // Asked for again, on deck 3: a new separation, not the stopped one.
+        load_track(&mut mode, 2, 8, track, &mut engine, &printer);
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |_, _| {
+            entered.try_recv().is_ok()
+        });
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 2);
+        steps.send(false).unwrap();
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |_, e| {
+            e.deck(DeckId::new(2).unwrap()).stems
         });
         mode.shutdown(&mut engine, &printer);
         printer.finish();
