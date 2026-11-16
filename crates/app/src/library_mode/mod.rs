@@ -2471,6 +2471,8 @@ mod tests {
     #[test]
     fn a_track_whose_file_changed_is_queued_again() {
         let (_dir, mut mode, mut engine, printer) = mode();
+        // Paused, so the track still waits and the counts do not depend on the workers.
+        mode.job(JobKind::Analysis, JobOp::Pause);
         mode.on_event(
             Event::NewTracks(vec![pending(1, 10)]),
             &mut engine,
@@ -2483,13 +2485,15 @@ mod tests {
             &printer,
         );
         assert_eq!(mode.queued_total, 1);
-        // The watcher rescanned it after a change (a copy completed): queued again.
+        // The watcher rescanned it after a change (a copy completed): asked again, under
+        // its new stamp. It still waits, so the analyzer keeps one entry for it.
         mode.on_event(
             Event::NewTracks(vec![pending(1, 20)]),
             &mut engine,
             &printer,
         );
-        assert_eq!(mode.queued_total, 2);
+        assert_eq!(mode.enqueued[&1].0, Some(20));
+        assert_eq!(mode.queued_total, 1);
         mode.shutdown(&mut engine, &printer);
         printer.finish();
     }
