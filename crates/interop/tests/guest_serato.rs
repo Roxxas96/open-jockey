@@ -261,4 +261,16 @@ fn a_metadata_symlink_out_of_the_stick_is_never_read() {
         .unwrap();
     let problem = vdj_source.problem.as_deref().expect("a problem");
     assert!(problem.contains("database.xml"), "{problem}");
+
+    // A `_Serato_` folder that is itself a link out of the stick is not read at all.
+    let linked = dir.path().join("LINKED");
+    copy_dir(&fixture(), &linked);
+    let real = dir.path().join("elsewhere").join("_Serato_");
+    fs::rename(linked.join("_Serato_"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, linked.join("_Serato_")).unwrap();
+    let stick = read_stick(&linked, "LINKED");
+    let source = serato(&stick);
+    assert!(source.tracks.is_empty() && source.playlists.is_empty());
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("outside this stick"), "{problem}");
 }
