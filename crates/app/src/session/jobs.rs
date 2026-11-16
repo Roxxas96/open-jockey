@@ -25,6 +25,7 @@ pub(crate) struct Pace {
 }
 
 impl Pace {
+    /// A measure with no samples: no estimate until some come in.
     pub fn new() -> Self {
         Self::default()
     }
@@ -103,11 +104,15 @@ pub(crate) struct AnalysisFacts {
     pub active: usize,
     /// Tracks finished in this run, and in all.
     pub done: usize,
+    /// Tracks queued in this run.
     pub total: usize,
+    /// The user paused the analysis.
     pub paused: bool,
     /// Stop was pressed: tracks in flight finish without a pill.
     pub stopped: bool,
+    /// The track being analyzed, if any.
     pub current: Option<String>,
+    /// The time left, once [`Pace`] can tell.
     pub eta: Option<Duration>,
 }
 

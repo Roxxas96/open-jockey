@@ -251,8 +251,10 @@ impl Analyzer {
 
     /// Queues tracks for analysis. Tracks whose stored analysis was made by
     /// [`ANALYZER_VERSION`] are skipped unless `force`. A track already waiting is not
-    /// queued twice (forcing it if either request did).
-    pub fn enqueue(&self, track_ids: &[i64], force: bool) {
+    /// queued twice (forcing it if either request did). Returns how many tracks were
+    /// added to the queue, so a caller counting a batch counts only those.
+    pub fn enqueue(&self, track_ids: &[i64], force: bool) -> usize {
+        let mut added = 0;
         let mut state = self.shared.state();
         for &id in track_ids {
             match state.force.get_mut(&id) {
@@ -260,11 +262,13 @@ impl Analyzer {
                 None => {
                     state.force.insert(id, force);
                     state.queue.push_back(id);
+                    added += 1;
                 }
             }
         }
         drop(state);
         self.shared.wake.notify_all();
+        added
     }
 
     /// Lets at most `n` workers analyze at once; the others wait. `0` pauses analysis
