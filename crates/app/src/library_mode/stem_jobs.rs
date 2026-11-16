@@ -290,6 +290,7 @@ impl StemsControl {
                 && j.frames == buffer.frames()
                 && j.sample_rate == buffer.sample_rate()
                 && !j.cancel.load(Ordering::Relaxed)
+                && !j.stopped.load(Ordering::Relaxed)
         });
         if let Some((&id, _)) = same {
             return Some(id);
@@ -373,8 +374,13 @@ impl StemsControl {
     }
 
     /// Pauses the queue, or resumes it: while paused nothing new is separated; the track
-    /// in flight finishes. Cache lookups go on, so loads from the cache stay quick.
+    /// in flight finishes. Cache lookups go on, so loads from the cache stay quick. A pause
+    /// with no queue (one that lands as the queue ends) is ignored: it would hold the next
+    /// queue with no pill to resume it from.
     pub fn pause(&mut self, paused: bool) {
+        if paused && self.queue_progress().is_none() {
+            return;
+        }
         self.shared.paused.store(paused, Ordering::Relaxed);
     }
 
