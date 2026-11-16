@@ -260,11 +260,14 @@ impl CoverWorker {
         }
     }
 
-    /// Where the pass is, or `None` between passes, when it found nothing to look up and
-    /// after a stop. Never waits.
+    /// Where the pass is, or `None` between passes, when it found nothing to look up,
+    /// after a stop and while the lookups are off. Never waits.
     pub fn progress(&self) -> Option<CoverProgress> {
         let total = self.shared.total.load(Ordering::Relaxed);
-        if total == 0 || self.shared.stopped.load(Ordering::Relaxed) {
+        if total == 0
+            || self.shared.stopped.load(Ordering::Relaxed)
+            || !self.enabled.load(Ordering::Relaxed)
+        {
             return None;
         }
         Some(CoverProgress {
@@ -387,6 +390,17 @@ enum Picture {
     Gone,
 }
 
+/// How a background lookup of a track went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Went {
+    /// A cover or a miss was recorded, or the track is not looked up.
+    Done,
+    /// The network failed: the lookups wait.
+    Network,
+    /// Cancelled (paused, stopped, turned off): the track is looked up again later.
+    Cancelled,
+}
+
 /// How a lookup ended.
 enum Outcome {
     Found(Vec<u8>),
@@ -461,10 +475,17 @@ impl Lookups {
                 *self.shared.current() = Some(label(&query));
                 let went = self.look_up(&query);
                 *self.shared.current() = None;
-                if went {
+                if went == Went::Cancelled {
+                    // Paused, stopped or turned off mid-lookup: nothing was recorded, and
+                    // the track is looked up again when the lookups go on.
+                    pass.looked_up -= 1;
+                    pass.after = before;
+                    break;
+                }
+                if went == Went::Done {
                     self.shared.advance();
                 }
-                if !went {
+                if went == Went::Network {
                     // A retry goes on from this track once the pause is over, not from the
                     // first missed track again.
                     if pass.retrying {
@@ -522,7 +543,12 @@ impl Lookups {
         let total = self
             .reader
             .count_tracks_needing_covers(retrying)
-            .unwrap_or(0);
+            .unwrap_or_else(|e| {
+                let _ = self.events.send(format!(
+                    "warning: could not count the covers to look up: {e}"
+                ));
+                0
+            });
         self.shared.begin(total);
         Pass {
             retrying,
@@ -575,9 +601,9 @@ impl Lookups {
         }
     }
 
-    /// Looks `query` up and records what was found, or the miss. Returns `false` after a
-    /// network failure (lookups then pause).
-    fn look_up(&mut self, query: &CoverQuery) -> bool {
+    /// Looks `query` up and records what was found, or the miss. A network failure pauses
+    /// the lookups, and a pause, stop or off switch during the lookup cancels it.
+    fn look_up(&mut self, query: &CoverQuery) -> Went {
         match self.own_picture(query.track) {
             // A file with a picture of its own shows it: nothing is sent, and the miss
             // keeps it from being checked again (a retry checks the file again, locally).
@@ -585,7 +611,7 @@ impl Lookups {
                 let _ = self
                     .writer
                     .submit_wait(WriteOp::MissCover { track: query.track });
-                return true;
+                return Went::Done;
             }
             Picture::None => {}
             // Nothing is known of the file: nothing is sent or recorded, and the file is
@@ -593,14 +619,14 @@ impl Lookups {
             Picture::Unknown => {
                 let later = Instant::now() + self.timing.retry_later;
                 self.later.insert(query.track, later);
-                return true;
+                return Went::Done;
             }
-            Picture::Gone => return true,
+            Picture::Gone => return Went::Done,
         }
-        match self.ask(query, None) {
+        match self.ask(query, None, true) {
             Outcome::Found(jpeg) => {
                 self.keep(query.track, &jpeg, None);
-                true
+                Went::Done
             }
             Outcome::Nothing => {
                 if !self.stopped() {
@@ -608,9 +634,16 @@ impl Lookups {
                         .writer
                         .submit_wait(WriteOp::MissCover { track: query.track });
                 }
-                true
+                Went::Done
             }
-            Outcome::Failed(e) => self.failed(query.track, &e),
+            Outcome::Failed(LookupError::Cancelled) => Went::Cancelled,
+            Outcome::Failed(e) => {
+                if self.failed(query.track, &e) {
+                    Went::Done
+                } else {
+                    Went::Network
+                }
+            }
         }
     }
 
@@ -675,7 +708,7 @@ impl Lookups {
         let had = found
             .and_then(|row| row.file.as_deref())
             .and_then(|file| std::fs::read(file).ok());
-        match self.ask(&query, had.as_deref()) {
+        match self.ask(&query, had.as_deref(), false) {
             // Removed again while it was looked up: the removal stands.
             Outcome::Found(_) if removals_of(&self.removals, track) != removed => {}
             Outcome::Found(jpeg) => self.keep(track, &jpeg, Some(removed)),
@@ -697,8 +730,8 @@ impl Lookups {
     }
 
     /// Asks the service for a cover of `query` that decodes and is not `had` (the JPEG the
-    /// track has now), shrunk.
-    fn ask(&self, query: &CoverQuery, had: Option<&[u8]>) -> Outcome {
+    /// track has now), shrunk. `background`: the lookup also ends when paused or stopped.
+    fn ask(&self, query: &CoverQuery, had: Option<&[u8]>, background: bool) -> Outcome {
         let kept = RefCell::new(None);
         let accept = |bytes: &[u8]| match shrink(bytes) {
             Ok(jpeg) if had != Some(jpeg.as_slice()) => {
@@ -707,7 +740,15 @@ impl Lookups {
             }
             _ => false,
         };
-        let go_on = || self.go_on();
+        // The background lookup stops between requests for a pause or a stop; the user's
+        // own request does not.
+        let go_on = || {
+            if background {
+                self.background_on()
+            } else {
+                self.go_on()
+            }
+        };
         match self.service.find_other(query, &accept, &go_on) {
             Ok(Some(_)) => kept.into_inner().map_or(Outcome::Nothing, Outcome::Found),
             // A service that failed for good (not on the network) has no cover for it:
@@ -1746,5 +1787,77 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(40));
         }
         assert_eq!(fake.calls(), 0);
+    }
+
+    /// An `Http` that records the urls and pauses the worker as the first request goes.
+    struct PausingHttp {
+        asked: Mutex<Vec<String>>,
+        shared: std::sync::OnceLock<Arc<Shared>>,
+    }
+
+    impl service::Http for PausingHttp {
+        fn get(&self, url: &str, _limit: u64) -> Result<Vec<u8>, service::HttpError> {
+            let first = {
+                let mut asked = self.asked.lock().unwrap();
+                asked.push(url.to_owned());
+                asked.len() == 1
+            };
+            if first {
+                self.shared
+                    .get()
+                    .unwrap()
+                    .paused
+                    .store(true, Ordering::Relaxed);
+            }
+            Err(service::HttpError::Status(404))
+        }
+    }
+
+    #[test]
+    fn pausing_mid_lookup_sends_no_further_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        let http = Arc::new(PausingHttp {
+            asked: Mutex::default(),
+            shared: std::sync::OnceLock::new(),
+        });
+        let as_http = || Arc::clone(&http) as Arc<dyn service::Http>;
+        let chain = service::Chain(vec![
+            Box::new(service::DeezerService::new(as_http(), Duration::ZERO)),
+            Box::new(service::MusicBrainzService::new(as_http(), Duration::ZERO)),
+        ]);
+        let worker = CoverWorker::start_with(&lib, Box::new(chain), on(), fast()).unwrap();
+        http.shared.set(Arc::clone(&worker.shared)).ok();
+        tracks(&dir, &lib, 1);
+        wait_until("the first request", || {
+            !http.asked.lock().unwrap().is_empty()
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(http.asked.lock().unwrap().len(), 1, "paused: no more");
+        let p = progress_of(&worker).unwrap();
+        assert_eq!((p.done, p.total, p.paused), (0, 1, true));
+        worker.set_paused(false);
+        wait_until("looked up again", || http.asked.lock().unwrap().len() > 1);
+        wait_until("the pass ends", || progress_of(&worker).is_none());
+        assert_eq!(state(&lib, 1), Some(CoverState::Missed));
+    }
+
+    #[test]
+    fn no_pill_while_cover_lookups_are_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = open(&dir);
+        tracks(&dir, &lib, 3);
+        let (service, fake) = FakeService::boxed(Answer::Nothing, Duration::from_millis(400));
+        let setting = Arc::new(AtomicBool::new(false));
+        let worker = CoverWorker::start_with(&lib, service, setting, fast()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(progress_of(&worker).is_none() && worker.job(Instant::now()).is_none());
+        assert_eq!(fake.calls(), 0);
+        worker.set_enabled(true);
+        wait_until("the pill", || progress_of(&worker).is_some());
+        worker.set_enabled(false);
+        assert!(progress_of(&worker).is_none(), "no pill once they are off");
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(progress_of(&worker).is_none());
     }
 }

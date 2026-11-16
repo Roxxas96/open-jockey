@@ -1129,6 +1129,12 @@ impl LibraryMode {
         jobs
     }
 
+    /// Says that the library was scanned, as the watcher does.
+    #[cfg(test)]
+    pub(crate) fn note_scanned(&mut self) {
+        self.scanned = true;
+    }
+
     /// Whether the library was scanned since the last call.
     pub fn take_scanned(&mut self) -> bool {
         std::mem::take(&mut self.scanned)
