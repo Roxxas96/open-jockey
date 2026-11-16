@@ -237,7 +237,8 @@ fn browser() -> BrowserView {
         list,
         list_offset: 0,
         list_count: BROWSER_ROWS,
-        list_seconds: None,
+        // Six minutes and a bit a track: "3 h 6 min" in all.
+        list_seconds: Some(BROWSER_ROWS as f64 * 372.0),
         all_selected: false,
         list_cursor: 0,
         search: None,

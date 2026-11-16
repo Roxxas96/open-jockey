@@ -13,6 +13,8 @@ use egui::{
     Align, CornerRadius, FontId, Id, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2,
 };
 
+use library::TreeKind;
+
 use crate::command::UiCommand;
 use crate::model::{ControlFrame, JobOp, JobState, JobView};
 use crate::theme;
@@ -58,17 +60,19 @@ fn grouped(n: usize) -> String {
     out
 }
 
-/// A length as "2 h 31 min", "12 min" or "40 s".
+/// A length as "2 h 31 min", "2 h", "12 min" or "40 s".
 fn length_text(seconds: f64) -> String {
     let minutes = (seconds / 60.0).round() as u64;
     match (minutes / 60, minutes % 60) {
         _ if minutes == 0 => format!("{} s", seconds.round() as u64),
         (0, m) => format!("{m} min"),
-        (h, m) => format!("{h} h {m:02} min").replace(" 0", " "),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
     }
 }
 
-/// The left text, without or with the list's total length.
+/// The left text, without or with the list's total length; nothing for the Playlists
+/// node, which lists nothing.
 fn list_text(frame: &ControlFrame, with_length: bool) -> String {
     let Some(view) = &frame.browser else {
         return String::new();
@@ -77,14 +81,21 @@ fn list_text(frame: &ControlFrame, with_length: bool) -> String {
     if view.all_selected {
         return format!("{} selected", grouped(n));
     }
-    let Some(seconds) = view.list_seconds else {
+    if view.playlist.is_none() {
+        let node = view.tree.get(view.tree_cursor);
+        if node.is_some_and(|row| row.kind == TreeKind::Playlists) {
+            return String::new();
+        }
         let files = if n == 1 { "file" } else { "files" };
         return format!("{} {files}", grouped(n));
-    };
+    }
     let name = view.path.rsplit('▸').next().unwrap_or("").trim();
     let tracks = if n == 1 { "track" } else { "tracks" };
     let mut text = format!("{name} · {} {tracks}", grouped(n));
-    if with_length && seconds >= 1.0 {
+    if let Some(seconds) = view.list_seconds
+        && with_length
+        && seconds >= 1.0
+    {
         text.push_str(" · ");
         text.push_str(&length_text(seconds));
     }
@@ -138,9 +149,17 @@ fn parts(job: &JobView) -> Parts {
     Parts { head, tail, bar }
 }
 
+/// Whether a pill has a Pause (or Resume) button and a Stop button: a locked job shows
+/// both, disabled, so the pointer can find out why.
+fn has_buttons(job: &JobView) -> (bool, bool) {
+    let locked = job.locked.is_some();
+    (job.can_pause || locked, job.can_stop || locked)
+}
+
 /// How many buttons a pill has.
 fn buttons(job: &JobView) -> usize {
-    usize::from(job.can_pause) + usize::from(job.can_stop)
+    let (pause, stop) = has_buttons(job);
+    usize::from(pause) + usize::from(stop)
 }
 
 /// The text widths a pill needs, measured once.
@@ -333,18 +352,19 @@ fn pill(ui: &mut Ui, rect: Rect, job: &JobView, form: Form, commands: &Sender<Ui
                         .selectable(false),
                 );
             }
-            if job.can_pause {
+            let (pause, stop) = has_buttons(job);
+            if pause {
                 let (op, name) = match job.state {
                     JobState::Running => (JobOp::Pause, "Pause"),
                     JobState::Pausing | JobState::Paused => (JobOp::Resume, "Resume"),
                 };
-                let enabled = job.locked.is_none() && job.state != JobState::Pausing;
+                let enabled = job.locked.is_none();
                 let sent = icon_button(ui, job, name, op, enabled);
                 if sent {
                     let _ = commands.send(UiCommand::Job { kind: job.kind, op });
                 }
             }
-            if job.can_stop {
+            if stop {
                 let enabled = job.locked.is_none();
                 if icon_button(ui, job, "Stop", JobOp::Stop, enabled) {
                     let _ = commands.send(UiCommand::Job {
@@ -400,8 +420,9 @@ fn icon_button(ui: &mut Ui, job: &JobView, name: &str, op: JobOp, enabled: bool)
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON), sense);
-    let text = format!("{name} {}", job.label);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text.clone()));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, enabled, format!("{name} {}", job.label))
+    });
     let colour = match (enabled, response.hovered()) {
         (false, _) => p.text_dim.gamma_multiply(0.5),
         (true, true) => p.text,

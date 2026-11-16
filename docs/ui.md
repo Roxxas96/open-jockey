@@ -250,11 +250,12 @@ and nothing is deleted.
 
 The window's bottom edge is one line of text, never more, with three parts:
 
-- **Left:** the open list, as `name · N tracks · length`; `N selected` while rows are
-  selected; `N files` for a folder.
+- **Left:** the open list, as `name · N tracks · length`; `N selected` after Cmd+A
+  (select all); `N files` for a folder; nothing on the Playlists node itself.
 - **Middle:** the latest message. An error stays until it is dealt with; an event fades
-  after 8 seconds; when there is neither, the status text shows (the browser's place and
-  the decks' names). Messages used to be in the top bar.
+  after 8 seconds; when there is neither, the first loaded deck's status line shows (the
+  browser's place is never repeated there: the left side says it), and with no deck loaded
+  the middle is blank. Messages used to be in the top bar.
 - **Right:** one pill for each background job that is running or paused: its label,
   done / total, a small bar, the time left, a Pause (or Resume) button and a Stop button.
   Resting the pointer on a pill shows the item it is on.
