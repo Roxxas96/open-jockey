@@ -167,6 +167,8 @@ struct Job {
     name: String,
     buffer: Arc<TrackBuffer>,
     cancel: Arc<AtomicBool>,
+    /// The queue was stopped: a cache hit is still served, but a miss is not separated.
+    stopped: Arc<AtomicBool>,
 }
 
 /// A job the control loop is waiting on.
@@ -178,8 +180,9 @@ struct JobEntry {
     status: JobStatus,
     /// The track's name, for the footer.
     name: String,
-    /// The queue was stopped: the job is on its way out and no longer counts.
-    stopped: bool,
+    /// The queue was stopped: the job is on its way out and no longer counts. Shared with
+    /// the thread, which then serves a cache hit but separates nothing.
+    stopped: Arc<AtomicBool>,
 }
 
 /// The control loop's side: queues jobs, cancels the ones no deck wants, and hands over
@@ -294,6 +297,7 @@ impl StemsControl {
         self.next_id += 1;
         let id = self.next_id;
         let cancel = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
         self.running.insert(
             id,
             JobEntry {
@@ -303,7 +307,7 @@ impl StemsControl {
                 cancel: Arc::clone(&cancel),
                 status: JobStatus::Looking,
                 name: name.clone(),
-                stopped: false,
+                stopped: Arc::clone(&stopped),
             },
         );
         let job = Job {
@@ -313,6 +317,7 @@ impl StemsControl {
             name,
             buffer,
             cancel,
+            stopped,
         };
         // A stopped thread (its cache could not open) has said so.
         if self
@@ -347,7 +352,7 @@ impl StemsControl {
     fn live(&self) -> impl Iterator<Item = &JobEntry> {
         self.running
             .values()
-            .filter(|j| !j.stopped && j.status != JobStatus::Looking)
+            .filter(|j| !j.stopped.load(Ordering::Relaxed) && j.status != JobStatus::Looking)
     }
 
     /// The name of the track being separated now, if one is.
@@ -374,12 +379,13 @@ impl StemsControl {
     }
 
     /// Stops the queue: every separation waiting or running is cancelled (the one in
-    /// flight stops at its next chunk) and the queue does not come back. Decks waiting on
-    /// those jobs keep what they have.
+    /// flight stops at its next chunk) and the queue does not come back. A track still
+    /// being looked up in the cache is told too: a hit is served, a miss is dropped,
+    /// never separated. Decks waiting on those jobs keep what they have.
     pub fn stop_all(&mut self) {
-        for job in self.running.values_mut() {
+        for job in self.running.values() {
+            job.stopped.store(true, Ordering::Relaxed);
             if job.status != JobStatus::Looking {
-                job.stopped = true;
                 job.cancel.store(true, Ordering::Relaxed);
             }
         }
@@ -416,7 +422,7 @@ impl StemsControl {
     /// still running.
     pub fn finish(&mut self, id: u64) -> Option<i64> {
         let job = self.running.remove(&id)?;
-        if !job.stopped && job.status != JobStatus::Looking {
+        if !job.stopped.load(Ordering::Relaxed) && job.status != JobStatus::Looking {
             self.queue_done += 1;
         }
         // The queue is over: the next one counts from nothing, and a pause ends with it.
@@ -737,7 +743,7 @@ fn look_up(
         reply(Reply::Done(job.id));
         return None;
     }
-    if !separable {
+    if !separable || job.stopped.load(Ordering::Relaxed) {
         reply(Reply::Done(job.id));
         return None;
     }

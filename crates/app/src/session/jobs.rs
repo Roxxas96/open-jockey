@@ -2,9 +2,8 @@
 //! pill. The footer reads these from the frame; nothing here waits on a job.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
-
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ui::{JobKind, JobState, JobView};
 
