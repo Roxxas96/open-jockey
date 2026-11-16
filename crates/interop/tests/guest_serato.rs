@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use interop::ExportError;
 use interop::export::serato::tags::write_tags;
+use interop::export::serato::tlv::{self, Body, Record};
 use interop::export::{ExportTrack, FileKind};
 use interop::guest::{GuestApp, GuestSource, GuestStick, read_stick};
 use library::HotcuePoint;
@@ -179,4 +180,85 @@ fn a_file_with_no_markers_has_no_cues() {
     assert!(track.hotcues.is_empty());
     // The other files keep theirs.
     assert!(!track_named(source, "OJ Click 126").hotcues.is_empty());
+}
+
+#[test]
+fn a_serato_path_outside_the_stick_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.wav");
+    fs::copy(fixture().join("Serato").join("OJ Click 120.wav"), &outside).unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    let absolute = outside.to_string_lossy().into_owned();
+    let paths = [
+        "../outside.wav",
+        absolute.as_str(),
+        "Serato/OJ Click 126.mp3",
+    ];
+    let crate_file = root
+        .join("_Serato_")
+        .join("Subcrates")
+        .join("OJ Serato B.crate");
+    fs::write(&crate_file, tlv::crate_file(&paths)).unwrap();
+    let otrk = |p: &str| Record {
+        tag: *b"otrk",
+        body: Body::Records(vec![tlv::text("pfil", p), tlv::text("tsng", "Evil")]),
+    };
+    let database = root.join("_Serato_").join("database V2");
+    let mut bytes = fs::read(&database).unwrap();
+    bytes.extend(tlv::encode(&[otrk("../outside.wav"), otrk(&absolute)]));
+    fs::write(&database, bytes).unwrap();
+
+    let stick = read_stick(&root, "OJGUEST");
+    let source = serato(&stick);
+    for track in &source.tracks {
+        assert!(track.path.starts_with(&root), "{}", track.path.display());
+        assert_ne!(track.title.as_deref(), Some("Evil"));
+    }
+    assert_eq!(source.tracks.len(), 3);
+    let b = source
+        .playlists
+        .iter()
+        .find(|p| p.name == "OJ Serato B")
+        .unwrap();
+    assert_eq!(b.tracks.len(), 1);
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("outside this stick"), "{problem}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_metadata_symlink_out_of_the_stick_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    let serato_dir = root.join("_Serato_");
+    // The database and one crate are links to copies outside the stick.
+    let elsewhere = dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let database = serato_dir.join("database V2");
+    fs::rename(&database, elsewhere.join("database V2")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("database V2"), &database).unwrap();
+    let crate_file = serato_dir.join("Subcrates").join("OJ Serato B.crate");
+    fs::rename(&crate_file, elsewhere.join("B.crate")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("B.crate"), &crate_file).unwrap();
+    // VirtualDJ's database too.
+    let vdj = root.join("VirtualDJ").join("database.xml");
+    fs::rename(&vdj, elsewhere.join("database.xml")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("database.xml"), &vdj).unwrap();
+
+    let stick = read_stick(&root, "OJGUEST");
+    let source = serato(&stick);
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("database V2"), "{problem}");
+    assert!(problem.contains("OJ Serato B.crate"), "{problem}");
+    let names: Vec<&str> = source.playlists.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["OJ Serato A"]);
+    let vdj_source = stick
+        .sources
+        .iter()
+        .find(|s| s.app == GuestApp::VirtualDj)
+        .unwrap();
+    let problem = vdj_source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("database.xml"), "{problem}");
 }

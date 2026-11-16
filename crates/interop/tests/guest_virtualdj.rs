@@ -168,6 +168,8 @@ fn a_path_outside_the_stick_is_never_read() {
     let source = vdj(&stick);
     nothing_evil(source);
     assert_eq!(source.playlists[0].tracks.len(), 3);
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("outside this stick"), "{problem}");
 }
 
 #[cfg(unix)]
@@ -199,4 +201,6 @@ fn a_symlink_out_of_the_stick_is_never_read() {
         "symlink read"
     );
     assert_eq!(source.playlists[0].tracks.len(), 3);
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("not on this stick"), "{problem}");
 }

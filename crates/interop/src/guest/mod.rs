@@ -120,3 +120,11 @@ pub(crate) fn on_stick(root: &Path, path: &Path) -> Option<PathBuf> {
     let real = dunce::canonicalize(path).ok()?;
     (real.is_file() && real.starts_with(&root)).then(|| path.to_path_buf())
 }
+
+/// Whether `dir` is a directory inside the stick at `root` (a link out of it is not).
+pub(crate) fn dir_on_stick(root: &Path, dir: &Path) -> bool {
+    let (Ok(root), Ok(real)) = (dunce::canonicalize(root), dunce::canonicalize(dir)) else {
+        return false;
+    };
+    real.is_dir() && real.starts_with(root)
+}

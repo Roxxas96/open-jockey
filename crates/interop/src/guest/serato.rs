@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::{
-    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, on_stick as confined,
+    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, dir_on_stick, on_stick as confined,
     track_from_tags,
 };
 use crate::export::FileKind;
@@ -35,8 +35,14 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     let mut outside = 0;
 
+    if !dir_on_stick(root, &dir) {
+        source.problem = Some("_Serato_ is outside this stick".into());
+        return Some(source);
+    }
     let database = dir.join("database V2");
-    if database.is_file() {
+    if database.is_file() && confined(root, &database).is_none() {
+        problems.push("database V2 is outside this stick".to_owned());
+    } else if database.is_file() {
         match fs::read(&database)
             .map_err(|e| e.to_string())
             .and_then(|b| decode(&b))
@@ -63,7 +69,18 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     }
 
     let crates = dir.join("Subcrates");
-    for (name, file) in crate_files(&crates, &dir) {
+    let crates_ok = dir_on_stick(root, &crates);
+    if !crates_ok && crates.exists() {
+        problems.push("Subcrates is outside this stick".to_owned());
+    }
+    for (name, file) in crate_files(root, &crates, &dir)
+        .into_iter()
+        .filter(|_| crates_ok)
+    {
+        if confined(root, &file).is_none() {
+            problems.push(format!("{name}.crate is outside this stick"));
+            continue;
+        }
         let records = match fs::read(&file)
             .map_err(|e| e.to_string())
             .and_then(|b| decode(&b))
@@ -140,7 +157,7 @@ fn track_with_cues(mut track: GuestTrack) -> GuestTrack {
 }
 
 /// The crate files of `crates` as (stem, path), in `neworder.pref` order and then by name.
-fn crate_files(crates: &Path, serato_dir: &Path) -> Vec<(String, PathBuf)> {
+fn crate_files(root: &Path, crates: &Path, serato_dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = fs::read_dir(crates) else {
         return Vec::new();
     };
@@ -155,7 +172,9 @@ fn crate_files(crates: &Path, serato_dir: &Path) -> Vec<(String, PathBuf)> {
         .filter_map(|p| Some((p.file_stem()?.to_string_lossy().into_owned(), p)))
         .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let listed = fs::read(serato_dir.join("neworder.pref"))
+    let pref = serato_dir.join("neworder.pref");
+    let listed = confined(root, &pref)
+        .and_then(|p| fs::read(p).ok())
         .map(|b| utf16be(&b))
         .unwrap_or_default();
     let order: Vec<&str> = listed
@@ -174,12 +193,6 @@ fn crate_files(crates: &Path, serato_dir: &Path) -> Vec<(String, PathBuf)> {
 fn on_stick(root: &Path, raw: &str, outside: &mut usize) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
     for part in raw.replace('\\', "/").split('/').filter(|p| !p.is_empty()) {
-        if matches!(
-            Path::new(part).components().next(),
-            Some(Component::ParentDir)
-        ) {
-            return None;
-        }
         path.push(part);
     }
     let found = confined(root, &path);
@@ -207,9 +220,15 @@ fn cues_of(path: &Path) -> Vec<GuestCue> {
     } else {
         0.0
     };
+    cues_from_markers(read_markers2(&data), shift)
+}
+
+/// Hotcues from `markers`, `shift` seconds earlier. A slot holds one cue: a cue wins over a
+/// loop at its index, and the first of any two at one index wins.
+fn cues_from_markers(markers: Vec<Marker>, shift: f64) -> Vec<GuestCue> {
     let seconds = |ms: u32| (f64::from(ms) / 1000.0 - shift).max(0.0);
     let named = |name: String| Some(name).filter(|n| !n.is_empty());
-    let mut cues: Vec<GuestCue> = read_markers2(&data)
+    let mut cues: Vec<GuestCue> = markers
         .into_iter()
         .filter_map(|marker| match marker {
             Marker::Cue {
@@ -239,6 +258,43 @@ fn cues_of(path: &Path) -> Vec<GuestCue> {
             _ => None,
         })
         .collect();
-    cues.sort_by_key(|c| c.slot);
+    // Cues first, so a loop at a cue's index is the one dropped.
+    cues.sort_by_key(|c| (c.slot, c.loop_seconds.is_some()));
+    cues.dedup_by_key(|c| c.slot);
     cues
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_serato_loop_never_takes_a_cue_slot() {
+        let markers = vec![
+            Marker::Loop {
+                index: 1,
+                start_ms: 5000,
+                end_ms: 6000,
+                name: String::new(),
+            },
+            Marker::Cue {
+                index: 1,
+                ms: 1000,
+                rgb: 0xCC8800,
+                name: String::new(),
+            },
+            Marker::Loop {
+                index: 2,
+                start_ms: 7000,
+                end_ms: 9000,
+                name: String::new(),
+            },
+        ];
+        let cues = cues_from_markers(markers, 0.0);
+        let slots: Vec<u8> = cues.iter().map(|c| c.slot).collect();
+        assert_eq!(slots, [1, 2]);
+        assert_eq!(cues[0].loop_seconds, None);
+        assert!((cues[0].seconds - 1.0).abs() < 1e-9);
+        assert_eq!(cues[1].loop_seconds, Some(2.0));
+    }
 }

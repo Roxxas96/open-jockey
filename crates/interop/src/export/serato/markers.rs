@@ -212,11 +212,16 @@ pub(crate) fn read_markers2(geob: &[u8]) -> Vec<Marker> {
         return Vec::new();
     };
     let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
-    let b64: Vec<u8> = text[..end]
+    let mut b64: Vec<u8> = text[..end]
         .iter()
         .copied()
         .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
         .collect();
+    // Serato writes a trailing symbol that completes no byte (the reference reader pads it
+    // with `A==`); the payload ends at its own terminator, so it is dropped.
+    if b64.len() % 4 == 1 {
+        b64.pop();
+    }
     let lenient = GeneralPurpose::new(
         &alphabet::STANDARD,
         GeneralPurposeConfig::new()
@@ -408,6 +413,30 @@ mod tests {
         want.extend(120f32.to_be_bytes());
         want.push(0);
         assert_eq!(beatgrid_geob(&t), Some(want));
+    }
+
+    #[test]
+    fn markers2_with_a_dangling_base64_symbol_still_reads() {
+        let mut t = track();
+        t.hotcues[0] = Some(point(44_100.0, None, Some("Drop")));
+        let mut payload = markers2_payload(&t);
+        // A whole number of base64 groups, then one extra symbol: 4n + 1 characters.
+        while !payload.len().is_multiple_of(3) {
+            payload.push(0);
+        }
+        let mut geob = vec![0x01, 0x01];
+        geob.extend(STANDARD_NO_PAD.encode(&payload).bytes());
+        geob.push(b'A');
+        geob.extend([0; 8]);
+        assert_eq!(
+            read_markers2(&geob),
+            [Marker::Cue {
+                index: 0,
+                ms: 1000,
+                rgb: 0xCC0000,
+                name: "Drop".into()
+            }]
+        );
     }
 
     #[test]
