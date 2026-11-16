@@ -87,16 +87,18 @@ impl Pace {
 }
 
 /// The jobs the frame lists, ordered by kind: library mode's (analysis, scan, stems), the
-/// cover lookup's, then the session's own (the import).
+/// cover lookup's, then the session's own (the import and the export).
 pub(super) fn gather(
     library: Option<&crate::library_mode::LibraryMode>,
     covers: Option<&crate::covers::CoverWorker>,
     import: Option<&super::import::Import>,
+    export: Option<&super::export::Export>,
     now: Instant,
 ) -> Vec<JobView> {
     let mut jobs = library.map(|l| l.jobs(now)).unwrap_or_default();
     jobs.extend(covers.and_then(|c| c.job(now)));
     jobs.extend(import.and_then(super::import::Import::job));
+    jobs.extend(export.and_then(|e| e.job(now)));
     jobs.sort_by_key(|job| job.kind);
     jobs
 }
@@ -247,6 +249,46 @@ pub(crate) fn stems_job(facts: StemsFacts) -> Option<JobView> {
         can_stop: true,
         locked: None,
     })
+}
+
+/// What the export pill needs to know.
+pub(crate) struct ExportFacts {
+    /// The stick's name.
+    pub stick: String,
+    /// Files finished and in all.
+    pub done: usize,
+    pub total: usize,
+    /// The user paused the export.
+    pub paused: bool,
+    /// The export is waiting for a resume, between two files.
+    pub waiting: bool,
+    /// The file being copied, if any.
+    pub current: Option<String>,
+    /// The time left, once [`Pace`] can tell.
+    pub eta: Option<Duration>,
+}
+
+/// The pill of an export being written. A pause lets the file in flight finish first, so it
+/// reads "pausing" until the export waits. Stop takes effect between two files.
+pub(crate) fn export_job(facts: ExportFacts) -> JobView {
+    let state = match (facts.paused, facts.waiting) {
+        (false, _) => JobState::Running,
+        (true, true) => JobState::Paused,
+        (true, false) => JobState::Pausing,
+    };
+    JobView {
+        kind: JobKind::Export,
+        label: format!("Exporting to {}", facts.stick),
+        done: Some(facts.done.min(facts.total)),
+        total: Some(facts.total),
+        eta: if facts.paused { None } else { facts.eta },
+        state,
+        current: facts.current,
+        note: None,
+        can_pause: true,
+        can_stop: true,
+        locked: None,
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +447,50 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn the_export_pill_counts_files_and_shows_the_time_left() {
+        // 6 of 20 files in 12 s: 14 left at 2 s a file.
+        let t0 = Instant::now();
+        let mut pace = Pace::new();
+        pace.sample(t0, 0, 20);
+        pace.sample(t0 + secs(12), 6, 20);
+        let facts = ExportFacts {
+            stick: "STICK".to_owned(),
+            done: 6,
+            total: 20,
+            paused: false,
+            waiting: false,
+            current: Some("Artist – Title".to_owned()),
+            eta: pace.eta(t0 + secs(12)),
+        };
+        let job = export_job(facts);
+        assert_eq!(job.kind, JobKind::Export);
+        assert_eq!(job.label, "Exporting to STICK");
+        assert_eq!((job.done, job.total), (Some(6), Some(20)));
+        assert_eq!(job.current.as_deref(), Some("Artist – Title"));
+        assert!(
+            (job.eta.unwrap().as_secs_f64() - 28.0).abs() < 1.0,
+            "{job:?}"
+        );
+        assert_eq!(job.state, JobState::Running);
+        assert!(job.can_pause && job.can_stop && job.locked.is_none());
+
+        // Paused mid-file, then waiting: no time left either way.
+        let facts = |paused, waiting| ExportFacts {
+            stick: "STICK".to_owned(),
+            done: 6,
+            total: 20,
+            paused,
+            waiting,
+            current: None,
+            eta: Some(secs(28)),
+        };
+        let pausing = export_job(facts(true, false));
+        assert_eq!((pausing.state, pausing.eta), (JobState::Pausing, None));
+        let paused = export_job(facts(true, true));
+        assert_eq!((paused.state, paused.eta), (JobState::Paused, None));
     }
 
     #[test]

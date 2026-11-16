@@ -257,6 +257,7 @@ impl FrameParts {
             pass.library,
             self.covers.as_ref(),
             self.import.as_ref(),
+            self.export.as_ref(),
             Instant::now(),
         );
         ControlFrame {

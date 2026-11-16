@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use interop::export::serato::markers::markers2_geob;
 use interop::export::serato::tlv::{Body, Record, decode};
 use interop::export::{
-    ExportError, ExportPlan, ExportProgress, ExportReport, Manifest, README_TEXT, REKORDBOX_STEPS,
-    REKORDBOX_STEPS_PATH, TrackAction, gather, plan_export, run,
+    ExportControl, ExportError, ExportPlan, ExportProgress, ExportReport, Manifest, README_TEXT,
+    REKORDBOX_STEPS, REKORDBOX_STEPS_PATH, TrackAction, gather, plan_export, run,
 };
 use interop::{VdjPoi, read_database, read_playlists};
 use library::{HotcuePoint, Library, RawStatement, WriteOp, add_folder, scan_folder};
@@ -174,8 +174,36 @@ fn plan(s: &Setup, playlists: &[i64]) -> ExportPlan {
 /// Runs the plan and returns the report and every progress call.
 fn run_plan(plan: &ExportPlan) -> (Result<ExportReport, ExportError>, Vec<ExportProgress>) {
     let calls = RefCell::new(Vec::new());
-    let result = run(plan, &|p| calls.borrow_mut().push(p));
+    let result = run(plan, &|p| {
+        calls.borrow_mut().push(p);
+        ExportControl::Go
+    });
     (result, calls.into_inner())
+}
+
+/// Runs the plan, answering `Stop` to the call after `files` tracks.
+fn run_until(plan: &ExportPlan, files: usize) -> ExportReport {
+    run(plan, &|p| {
+        if p.done >= files {
+            ExportControl::Stop
+        } else {
+            ExportControl::Go
+        }
+    })
+    .unwrap()
+}
+
+/// Every file of the stick but the music and the manifest, with its bytes.
+fn databases(s: &Setup) -> BTreeMap<PathBuf, Vec<u8>> {
+    all_files(&s.stick)
+        .into_iter()
+        .filter(|f| !f.starts_with(Path::new("Open Jockey").join("Music")))
+        .filter(|f| f.file_name().is_some_and(|n| n != "export.toml"))
+        .map(|f| {
+            let bytes = fs::read(s.stick.join(&f)).unwrap();
+            (f, bytes)
+        })
+        .collect()
 }
 
 fn export(s: &Setup, playlists: &[i64]) -> ExportReport {
@@ -955,4 +983,102 @@ fn a_track_listed_twice_in_a_playlist_gets_a_serato_note() {
     );
     let z = playlist(&s, "Z", &[a, b]);
     assert!(export(&s, &[z]).notes.is_empty());
+}
+
+/// Adds the tracks `more` to the end of the playlist `list`.
+fn append(s: &Setup, list: i64, first_position: i64, more: &[i64]) {
+    for (at, t) in more.iter().enumerate() {
+        raw(
+            &s.lib,
+            "INSERT INTO playlist_tracks(playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+            vec![
+                Value::Integer(list),
+                Value::Integer(first_position + at as i64),
+                Value::Integer(*t),
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_stopped_export_leaves_the_previous_databases() {
+    let s = setup();
+    let ids = add_tracks(&s, &["a.wav", "b.wav", "c.wav", "d.wav"]);
+    let x = playlist(&s, "X", &[ids[0]]);
+    export(&s, &[x]);
+    let before = databases(&s);
+
+    append(&s, x, 1, &ids[1..]);
+    let p = plan(&s, &[x]);
+    let report = run_until(&p, 2);
+    assert!(report.stopped);
+    // The first track was kept, the second copied; the others were not reached.
+    assert_eq!((report.kept, report.copied), (1, 1));
+    assert!(at(&s.stick, "Open Jockey/Music/Unknown Artist/b.wav").exists());
+    assert!(!at(&s.stick, "Open Jockey/Music/Unknown Artist/c.wav").exists());
+
+    // Every database, crate, list and note is byte for byte what the first export wrote.
+    assert_eq!(databases(&s), before);
+    // And each reader still parses the stick, with the first export's playlist.
+    assert_eq!(crate_tracks(&crate_path(&s, "X")), ["a.wav"]);
+    assert_eq!(xml_playlists(&s)["X"], ["a.wav"]);
+    assert_eq!(vdj_list(&s, "X"), ["a.wav"]);
+    // The manifest still names what the first export wrote, and the copies made since.
+    let manifest = Manifest::read(&s.stick).unwrap().unwrap();
+    assert_eq!(manifest.playlists, ["X"]);
+    assert_eq!(manifest.crates, ["X.crate"]);
+    assert!(
+        manifest
+            .tracks
+            .contains(&"Music/Unknown Artist/b.wav".to_owned())
+    );
+    assert!(
+        !manifest
+            .tracks
+            .contains(&"Music/Unknown Artist/c.wav".to_owned())
+    );
+}
+
+#[test]
+fn the_next_export_completes_a_stopped_one() {
+    let s = setup();
+    let ids = add_tracks(&s, &["a.wav", "b.wav", "c.wav", "d.wav"]);
+    let x = playlist(&s, "X", &ids[..3]);
+    // A first export that stops after one file leaves a stick with no playlists at all.
+    let first = run_until(&plan(&s, &[x]), 1);
+    assert!(first.stopped);
+    assert_eq!(first.copied, 1);
+    assert!(!crate_path(&s, "X").exists());
+    assert!(
+        Manifest::read(&s.stick)
+            .unwrap()
+            .unwrap()
+            .playlists
+            .is_empty()
+    );
+
+    let done = export(&s, &[x]);
+    assert!(!done.stopped);
+    // What the stopped run copied is kept, the rest is copied, and the databases are written.
+    assert_eq!((done.kept, done.copied), (1, 2));
+    assert_eq!(
+        crate_tracks(&crate_path(&s, "X")),
+        ["a.wav", "b.wav", "c.wav"]
+    );
+    assert_eq!(xml_playlists(&s)["X"], ["a.wav", "b.wav", "c.wav"]);
+    assert_eq!(vdj_list(&s, "X"), ["a.wav", "b.wav", "c.wav"]);
+    let manifest = Manifest::read(&s.stick).unwrap().unwrap();
+    assert_eq!(manifest.playlists, ["X"]);
+    assert_eq!(manifest.crates, ["X.crate"]);
+    assert_eq!(manifest.tracks.len(), 3);
+
+    // The same after a second stopped run on top of a finished one, then a finishing one.
+    append(&s, x, 3, &ids[3..]);
+    let again = run_until(&plan(&s, &[x]), 2);
+    assert!(again.stopped);
+    assert_eq!(crate_tracks(&crate_path(&s, "X")).len(), 3);
+    let last = export(&s, &[x]);
+    assert_eq!((last.kept, last.copied), (3, 1));
+    assert_eq!(crate_tracks(&crate_path(&s, "X")).len(), 4);
+    assert_eq!(Manifest::read(&s.stick).unwrap().unwrap().tracks.len(), 4);
 }

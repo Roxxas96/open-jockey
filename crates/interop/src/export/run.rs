@@ -89,6 +89,15 @@ pub struct ExportProgress {
     pub total: usize,
 }
 
+/// What the caller of [`run`] answers after each track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportControl {
+    /// Carry on with the next track.
+    Go,
+    /// Stop before the next track: no library file is written.
+    Stop,
+}
+
 /// What an export did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExportReport {
@@ -104,6 +113,10 @@ pub struct ExportReport {
     pub playlists: usize,
     /// Things worth telling the user.
     pub notes: Vec<String>,
+    /// The caller stopped the export between two tracks: the files copied so far stay, and
+    /// no Serato, Rekordbox or VirtualDJ file was written, so the stick keeps its previous
+    /// playlists. The next export finishes the job.
+    pub stopped: bool,
 }
 
 /// `n` and the noun for it: `one` when `n` is 1, else `many`.
@@ -119,8 +132,11 @@ fn megabytes(bytes: u64) -> String {
 /// Runs `plan`: copies the tracks, writes Serato's, Rekordbox's and VirtualDJ's library files,
 /// deletes what an earlier export wrote and this one no longer uses, and writes the manifest
 /// last. Each step leaves the stick usable, so an export that stops halfway leaves the earlier
-/// one in place, and the next export picks up from there. `progress` is called after each
-/// track and once at the end.
+/// one in place, and the next export picks up from there. `control` is called after each
+/// track and once at the end; it may block (a pause), and answers [`ExportControl::Stop`]
+/// to stop between two tracks. A stopped run writes no library file and leaves the manifest
+/// naming what finished runs wrote, plus the copies it made, so the next export copies what
+/// is missing and then writes the library files; the report says `stopped`.
 ///
 /// # Errors
 ///
@@ -129,7 +145,7 @@ fn megabytes(bytes: u64) -> String {
 /// [`ExportError::Format`] when a file cannot be read or written.
 pub fn run(
     plan: &ExportPlan,
-    progress: &dyn Fn(ExportProgress),
+    control: &dyn Fn(ExportProgress) -> ExportControl,
 ) -> Result<ExportReport, ExportError> {
     let Some(free) = plan.free_bytes else {
         return Err(ExportError::Refused(FREE_SPACE_UNKNOWN.to_owned()));
@@ -186,7 +202,22 @@ pub fn run(
                 report.copied += 1;
             }
         }
-        progress(ExportProgress { done: i + 1, total });
+        if control(ExportProgress { done: i + 1, total }) == ExportControl::Stop {
+            // Only the copies are on the stick: the library files and the manifest's names
+            // stay as the last finished run left them, and the copies made are recorded
+            // as ours.
+            let mut wrote = previous.cloned().unwrap_or(Manifest {
+                version: 1,
+                playlists: Vec::new(),
+                crates: Vec::new(),
+                vdj_lists: Vec::new(),
+                tracks: Vec::new(),
+            });
+            wrote.tracks = union(&wrote.tracks, &tracks[..=i]);
+            wrote.write(stick)?;
+            report.stopped = true;
+            return Ok(report);
+        }
     }
 
     let cx = StickContext {
@@ -265,7 +296,8 @@ pub fn run(
             count(twice, "playlist lists", "playlists list")
         ));
     }
-    progress(ExportProgress { done: total, total });
+    // Nothing is left to stop: the answer is not asked.
+    control(ExportProgress { done: total, total });
     Ok(report)
 }
 
