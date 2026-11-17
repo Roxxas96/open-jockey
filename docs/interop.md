@@ -118,11 +118,44 @@ Two things the hands-on checked or still has to check:
   its absolute path, so the stick is plugged into a computer where it mounts under another name
   (or drive letter), and VirtualDJ must still find the tracks of each list.
 
+## Guest sticks
+
+A USB stick that another DJ's Serato, rekordbox or VirtualDJ exported shows in the browser,
+and its tracks play with that app's cues. Only a volume with an app's marker counts
+(`_Serato_/`, `PIONEER/rekordbox/export.pdb`, a `rekordbox.xml` at the root, `VirtualDJ/`),
+and a volume that holds one of your own library folders is never a guest stick. It shows
+when it is plugged in and goes when it is removed.
+
+**What shows.** The stick's node replaces the drive's plain row. It has one branch per app
+("Serato", "rekordbox", "rekordbox (xml)", "VirtualDJ"), each with its playlists or crates
+in the order that app has them (nested folders flatten to "Folder / Playlist"), and a
+"Files" child. A track that is in no playlist or crate is reached through "Files"; there is
+no "All tracks" list. A source the app cannot read shows its problem as the branch's note.
+
+**What is never written.** Nothing on the stick is changed: it is only read, with no cache
+or index file. Nothing of it reaches your library either: no track, cue, grid, cover, stems
+row or playlist entry. These are refused: dropping or adding a guest track to a playlist
+("Guest tracks can't be added to your playlists"), and deleting (moving to the Trash) a
+guest stick's rows or files ("A guest stick is never changed").
+
+**How a track plays.** It loads with its app's hotcues, saved loops and grid. Cues past the
+end of the file are dropped, with a message. A gridless track gets a BPM detected in memory
+only; a VirtualDJ track with a BPM but no first beat gets a grid starting at 0 s. Cover
+lookup, cover removal and stems are not available for guest tracks.
+
+**Edits last for the session.** Hotcue, label and grid edits on a guest deck are kept in
+memory, so a reload shows them, but they are lost when the stick is unplugged.
+
+**Removing the stick.** A deck playing a guest track keeps playing what it has decoded, and
+its title shows "(stick removed)". Loading from a stick that has gone fails with "Stick
+{name} is no longer plugged in".
+
+Not covered: CDJ playback, and rekordbox's encrypted `exportLibrary.db`.
+
 ## Known limits
 
 - Not verified: another computer or Windows, and Serato DJ Pro's saved loops (see the top of
   this page).
 - One level of playlists: folders are not exported.
 - No CDJ export (`PIONEER/` with `export.pdb`): there is no CDJ to verify it on.
-- Guest sticks (playing a friend's Serato, Rekordbox or VirtualDJ stick in Open Jockey) come in
-  a later plan.
+- Guest sticks are read only; see [Guest sticks](#guest-sticks) for what they do not do.
