@@ -263,3 +263,78 @@ fn a_playlist_inside_a_playlist_keeps_the_outer_one() {
         .collect();
     assert_eq!(names, ["Outer", "Outer / Inner"]);
 }
+
+/// Runs `read_stick` on a thread and fails the test when it takes longer than `secs`.
+fn read_within(root: &Path, secs: u64) -> GuestStick {
+    let root = root.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_stick(&root, "OJGUEST"));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs))
+        .expect("the stick is read in time")
+}
+
+#[test]
+fn a_deep_rekordbox_xml_tree_stays_bounded() {
+    // 2,000 nested folders with long names, then 12,000 playlists in the innermost one.
+    let mut tree = String::from(r#"<NODE Type="0" Name="ROOT">"#);
+    let folder = format!(r#"<NODE Type="0" Name="{}">"#, "x".repeat(2000));
+    for n in 0..2000 {
+        tree.push_str(&folder);
+        if n == 1 {
+            // A playlist within the depth cap, under two long names: kept, its name cut.
+            tree.push_str(r#"<NODE Type="1" Name="near"/>"#);
+        }
+    }
+    for _ in 0..12_000 {
+        tree.push_str(r#"<NODE Type="1" Name="leaf"/>"#);
+    }
+    for _ in 0..2001 {
+        tree.push_str("</NODE>");
+    }
+    // Also 12,000 shallow playlists: the count cap holds without any depth.
+    let mut flat = String::from(r#"<NODE Type="0" Name="ROOT">"#);
+    for n in 0..12_000 {
+        flat.push_str(&format!(r#"<NODE Type="1" Name="list {n}"/>"#));
+    }
+    flat.push_str("</NODE>");
+    for (playlists, why) in [(tree, "nested too deep"), (flat, "too many playlists")] {
+        let dir = stick_with(&one_track_xml(
+            "file://localhost/Music/OJ%20Click%20126.mp3",
+            &playlists,
+        ));
+        let stick = read_stick(dir.path(), "OJGUEST");
+        let source = xml(&stick);
+        assert!(
+            source.playlists.len() <= 10_000,
+            "{}",
+            source.playlists.len()
+        );
+        assert!(
+            source
+                .playlists
+                .iter()
+                .all(|l| l.name.chars().count() <= 1024)
+        );
+        let total: usize = source.playlists.iter().map(|l| l.name.len()).sum();
+        assert!(total <= 32 * 1024 * 1024);
+        assert!(!source.playlists.is_empty());
+        let problem = source.problem.as_deref().expect("a problem");
+        assert!(problem.contains(why), "{problem}");
+    }
+}
+
+#[test]
+fn a_location_with_very_many_parts_is_refused_quickly() {
+    let deep = "a/".repeat(100_000);
+    let dir = stick_with(&one_track_xml(
+        &format!("file://localhost/{deep}OJ%20Click%20126.mp3"),
+        "",
+    ));
+    let stick = read_within(dir.path(), 20);
+    let source = xml(&stick);
+    assert!(source.tracks.is_empty());
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("outside this stick"), "{problem}");
+}

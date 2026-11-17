@@ -9,7 +9,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
 use super::{
-    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, on_stick, track_from_tags,
+    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, MAX_DEPTH, MAX_NAME_BYTES,
+    MAX_PATH_PARTS, MAX_PLAYLISTS, join_name, on_stick, read_capped, track_from_tags,
 };
 
 /// Slots of a guest hotcue; rekordbox's `Num` 0..=7.
@@ -37,26 +38,20 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
         source.problem = Some("rekordbox.xml is outside this stick".into());
         return Some(source);
     };
-    let bytes = match std::fs::metadata(&file) {
-        Ok(m) if m.len() > MAX_XML_BYTES => {
-            source.problem = Some("rekordbox.xml is too large to read".into());
-            return Some(source);
-        }
-        Ok(_) => std::fs::read(&file),
-        Err(e) => Err(e),
-    };
-    let bytes = match bytes {
+    let bytes = match read_capped(&file, MAX_XML_BYTES) {
         Ok(b) => b,
         Err(e) => {
-            source.problem = Some(format!("rekordbox.xml could not be read: {e}"));
+            source.problem = Some(format!("rekordbox.xml {e}"));
             return Some(source);
         }
     };
     let mut locator = Locator::new(root);
+    let mut tree = Tree::default();
     let mut problems = Vec::new();
-    if let Err(why) = parse(&bytes, &mut locator, &mut source) {
+    if let Err(why) = parse(&bytes, &mut locator, &mut tree, &mut source) {
         problems.push(format!("rekordbox.xml is damaged: {why}"));
     }
+    problems.extend(tree.problems());
     problems.extend(locator.problems());
     if !problems.is_empty() {
         source.problem = Some(problems.join("; "));
@@ -78,16 +73,90 @@ struct Pending {
     hotcues: Vec<GuestCue>,
 }
 
+/// The open `<NODE>`s of the playlist tree while it is read, bounded like the device reader's:
+/// at most [`MAX_DEPTH`] folders deep, [`MAX_PLAYLISTS`] playlists and [`MAX_NAME_BYTES`] of
+/// names, each name cut by [`join_name`].
+#[derive(Default)]
+struct Tree {
+    /// Per open node, kept: the flattened name of the folders down to it (the tree's root
+    /// node adds none), and whether it is a playlist.
+    open: Vec<(String, bool)>,
+    /// Open nodes below the depth cap, which are skipped with all they hold.
+    skipped: usize,
+    name_bytes: usize,
+    playlists: usize,
+    too_deep: bool,
+    too_many: bool,
+}
+
+impl Tree {
+    /// Opens a `<NODE>` (and closes it again when `closes`). Returns the flattened name of a
+    /// playlist that may be built, or `None` for a folder, for a node below the depth cap and
+    /// for a playlist past the count or name caps.
+    fn start(&mut self, name: &str, is_list: bool, closes: bool) -> Option<String> {
+        if self.skipped > 0 || self.open.len() >= MAX_DEPTH {
+            self.too_deep = true;
+            self.skipped += usize::from(!closes);
+            return None;
+        }
+        let prefix = self.open.last().map_or("", |(p, _)| p.as_str());
+        let list = is_list.then(|| join_name(prefix, name)).filter(|list| {
+            let fits =
+                self.playlists < MAX_PLAYLISTS && self.name_bytes + list.len() <= MAX_NAME_BYTES;
+            if fits {
+                self.playlists += 1;
+                self.name_bytes += list.len();
+            } else {
+                self.too_many = true;
+            }
+            fits
+        });
+        if !closes {
+            // The tree's root node adds nothing to the names below it.
+            let below = if self.open.is_empty() {
+                String::new()
+            } else {
+                join_name(prefix, name)
+            };
+            self.open.push((below, is_list));
+        }
+        list
+    }
+
+    /// Closes a `<NODE>`; whether it was a kept playlist node.
+    fn end(&mut self) -> bool {
+        if self.skipped > 0 {
+            self.skipped -= 1;
+            return false;
+        }
+        self.open.pop().is_some_and(|(_, is_list)| is_list)
+    }
+
+    fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.too_deep {
+            out.push("some playlist folders are nested too deep to show".to_owned());
+        }
+        if self.too_many {
+            out.push("this stick has too many playlists to show".to_owned());
+        }
+        out
+    }
+}
+
 /// Streams the document: the collection's tracks, then the playlist nodes in order.
-fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Result<(), String> {
+fn parse(
+    bytes: &[u8],
+    locator: &mut Locator,
+    tree: &mut Tree,
+    source: &mut GuestSource,
+) -> Result<(), String> {
     let mut reader = Reader::from_reader(bytes);
     let mut buf = Vec::new();
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut in_collection = false;
     let mut in_playlists = false;
     let mut track: Option<Pending> = None;
-    // Open `<NODE>`s of the playlist tree: a name for a folder, and whether it is a playlist.
-    let mut nodes: Vec<(String, bool)> = Vec::new();
     let mut open_playlist: Option<GuestPlaylist> = None;
     let mut depth = 0usize;
     loop {
@@ -135,18 +204,17 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
                 "NODE" if in_playlists => {
                     let name = attr(e, "Name").unwrap_or_default();
                     let is_list = attr(e, "Type").as_deref() == Some("1");
+                    let list = tree.start(&name, is_list, closes);
                     if is_list {
                         // A playlist inside a playlist: the outer one is complete as read.
                         source.playlists.extend(open_playlist.take());
-                        open_playlist = Some(GuestPlaylist {
-                            name: flatten(&nodes, &name),
+                        open_playlist = list.map(|name| GuestPlaylist {
+                            name,
                             tracks: Vec::new(),
                         });
                     }
                     if closes {
                         source.playlists.extend(open_playlist.take());
-                    } else {
-                        nodes.push((name, is_list));
                     }
                 }
                 "TRACK" if in_playlists => {
@@ -168,7 +236,7 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
                     }
                 }
                 // The pop runs in the guard so a folder closes too; only a playlist is stored.
-                "NODE" if in_playlists && nodes.pop().is_some_and(|(_, is_list)| is_list) => {
+                "NODE" if in_playlists && tree.end() => {
                     source.playlists.extend(open_playlist.take());
                 }
                 _ => {}
@@ -182,16 +250,6 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
         buf.clear();
     }
     Ok(())
-}
-
-/// `Folder / Name`: the folders above a playlist, leaving out the tree's root node.
-fn flatten(open: &[(String, bool)], name: &str) -> String {
-    open.iter()
-        .skip(1)
-        .map(|(n, _)| n.as_str())
-        .chain([name])
-        .collect::<Vec<_>>()
-        .join(" / ")
 }
 
 fn attr(e: &BytesStart<'_>, key: &str) -> Option<String> {
@@ -351,10 +409,11 @@ impl Locator {
         out
     }
 
-    /// The file on the stick for a `file://` location, counting a refusal or a miss.
+    /// The file on the stick for a `file://` location, counting a refusal or a miss. A
+    /// location with a `..` or more than [`MAX_PATH_PARTS`] parts is refused as outside.
     fn find(&mut self, location: &str) -> Option<PathBuf> {
         let parts = parts_of(location);
-        if parts.is_empty() || parts.iter().any(|p| p == "..") {
+        if parts.is_empty() || parts.len() > MAX_PATH_PARTS || parts.iter().any(|p| p == "..") {
             self.outside += 1;
             return None;
         }

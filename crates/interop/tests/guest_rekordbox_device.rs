@@ -310,3 +310,19 @@ fn a_crafted_pdb_with_repeated_tables_and_rows_stays_bounded() {
     let source = source_of(&read, GuestApp::RekordboxDevice);
     assert!(source.tracks.len() <= 3, "{} tracks", source.tracks.len());
 }
+
+#[test]
+fn missing_analysis_files_are_not_called_outside() {
+    // A stick whose USBANLZ was not copied at all.
+    let (stick, _) = device_copy();
+    fs::remove_dir_all(stick.path().join("PIONEER").join("USBANLZ")).unwrap();
+    let read = read_stick(stick.path(), "COPY");
+    let source = source_of(&read, GuestApp::RekordboxDevice);
+    assert_eq!(source.tracks.len(), 3);
+    let problem = source.problem.as_deref().expect("a problem is reported");
+    assert!(
+        problem.contains("3 analysis file(s) are missing from this stick"),
+        "{problem}"
+    );
+    assert!(!problem.contains("outside"), "{problem}");
+}

@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, dir_on_stick, on_stick as confined,
-    track_from_tags,
+    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, MAX_DATABASE_BYTES, MAX_LIST_BYTES,
+    MAX_PATH_PARTS, dir_on_stick, on_stick as confined, track_from_tags,
 };
-use crate::virtualdj::{VdjPoi, VdjSong, read_database, read_playlists};
+use crate::virtualdj::{VdjPoi, VdjSong, read_database_capped, read_playlists_capped};
 
 /// Slots of a guest hotcue; VirtualDJ's `Num` 1..=8 become slot 0..=7.
 const SLOTS: u32 = 8;
@@ -35,7 +35,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     if database.is_file() && confined(root, &database).is_none() {
         problems.push("database.xml is outside this stick".to_owned());
     } else if database.is_file() {
-        match read_database(&database, Some(root)) {
+        match read_database_capped(&database, Some(root), Some(MAX_DATABASE_BYTES)) {
             Ok(songs) => {
                 let mut outside = 0;
                 for song in songs {
@@ -65,7 +65,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     } else if lists.is_dir() {
         let order = lists.join("order");
         let order = confined(root, &order);
-        match read_playlists(&[lists], order.as_deref()) {
+        match read_playlists_capped(&[lists], order.as_deref(), Some(MAX_LIST_BYTES)) {
             Ok((playlists, errors)) => {
                 problems.extend(errors.iter().map(ToString::to_string));
                 let mut dropped = 0;
@@ -149,12 +149,15 @@ fn track(song: VdjSong) -> GuestTrack {
             name,
         });
     }
+    // A slot holds one cue: the first in the database wins, as with the other apps.
     track.hotcues.sort_by_key(|c| c.slot);
+    track.hotcues.dedup_by_key(|c| c.slot);
     track
 }
 
 /// Maps a playlist path written under another mount (`/Volumes/<name>/…`, `E:/…`) onto the
-/// stick: the longest tail of the path that names a file under `root`.
+/// stick: the longest tail of the path that names a file under `root`. A path of more than
+/// [`MAX_PATH_PARTS`] parts is refused unread, so the tails tried stay few and short.
 fn on_stick(raw: &Path, root: &Path) -> Option<PathBuf> {
     if raw.starts_with(root) {
         return confined(root, raw);
@@ -166,6 +169,9 @@ fn on_stick(raw: &Path, root: &Path) -> Option<PathBuf> {
         .filter(|p| !p.is_empty())
         .map(str::to_owned)
         .collect();
+    if parts.len() > MAX_PATH_PARTS {
+        return None;
+    }
     (0..parts.len())
         .map(|skip| {
             parts[skip..]
@@ -173,4 +179,47 @@ fn on_stick(raw: &Path, root: &Path) -> Option<PathBuf> {
                 .fold(root.to_path_buf(), |p, part| p.join(part))
         })
         .find_map(|candidate| confined(root, &candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_first_cue_of_a_slot_is_kept() {
+        let cue = |num, seconds, name: &str| VdjPoi::Hotcue {
+            num,
+            seconds,
+            name: Some(name.into()),
+            color: None,
+        };
+        let song = VdjSong {
+            path: PathBuf::from("missing.mp3"),
+            size: None,
+            title: Some("t".into()),
+            artist: None,
+            album: None,
+            seconds_per_beat: Some(0.5),
+            pois: vec![
+                cue(2, 4.0, "first"),
+                VdjPoi::Loop {
+                    num: 2,
+                    seconds: 8.0,
+                    beats: 4.0,
+                    name: Some("second".into()),
+                    color: None,
+                },
+                cue(1, 1.0, "one"),
+                cue(2, 9.0, "third"),
+            ],
+            other_markers: 0,
+            from_drive: true,
+        };
+        let cues = track(song).hotcues;
+        let got: Vec<(u8, &str)> = cues
+            .iter()
+            .map(|c| (c.slot, c.name.as_deref().unwrap()))
+            .collect();
+        assert_eq!(got, [(0, "one"), (1, "first")]);
+    }
 }

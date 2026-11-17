@@ -2,6 +2,7 @@
 //!
 //! Nothing here writes to the stick, and nothing read is added to the owner's library.
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 mod anlz;
@@ -103,6 +104,71 @@ pub fn read_stick(root: &Path, name: &str) -> GuestStick {
     }
 }
 
+/// The largest database file read whole (Serato's `database V2`, VirtualDJ's `database.xml`).
+pub(crate) const MAX_DATABASE_BYTES: u64 = 256 * 1024 * 1024;
+/// The largest playlist or order file read whole (a crate, `neworder.pref`, a `.vdjfolder`,
+/// an `.m3u`, VirtualDJ's `order`).
+pub(crate) const MAX_LIST_BYTES: u64 = 16 * 1024 * 1024;
+/// The most parts a stored track path may have; a deeper one is refused unread, so mapping it
+/// onto the stick stays cheap. FAT and exFAT paths are never this deep.
+pub(crate) const MAX_PATH_PARTS: usize = 64;
+
+/// Why a capped read gave no bytes.
+#[derive(Debug)]
+pub(crate) enum ReadError {
+    /// Larger than the cap; nothing was read.
+    TooLarge,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => f.write_str("is too large to read"),
+            Self::Io(e) => write!(f, "could not be read: {e}"),
+        }
+    }
+}
+
+/// The bytes of `path`, or [`ReadError::TooLarge`] when it holds more than `max`. The size is
+/// checked before reading, and the read itself stops past `max`, so a file that grows or a
+/// damaged entry that misreports its size cannot make it unbounded.
+pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
+    let file = std::fs::File::open(path).map_err(ReadError::Io)?;
+    if file.metadata().map_err(ReadError::Io)?.len() > max {
+        return Err(ReadError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(ReadError::Io)?;
+    if bytes.len() as u64 > max {
+        return Err(ReadError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+/// The deepest playlist folder nesting followed.
+pub(crate) const MAX_DEPTH: usize = 32;
+/// The most playlists built from one source.
+pub(crate) const MAX_PLAYLISTS: usize = 10_000;
+/// The most bytes one source's flattened playlist names take together.
+pub(crate) const MAX_NAME_BYTES: usize = 32 * 1024 * 1024;
+/// The longest flattened playlist name, in characters.
+pub(crate) const MAX_NAME_CHARS: usize = 1024;
+
+/// `prefix / name` (just `name` under no folder), cut to [`MAX_NAME_CHARS`] without building
+/// the uncut name first.
+pub(crate) fn join_name(prefix: &str, name: &str) -> String {
+    let sep = if prefix.is_empty() { "" } else { " / " };
+    prefix
+        .chars()
+        .chain(sep.chars())
+        .chain(name.chars())
+        .take(MAX_NAME_CHARS)
+        .collect()
+}
+
 /// A track with only what its file's tags say: the title falls back to the file stem.
 fn track_from_tags(path: PathBuf) -> GuestTrack {
     let tags = library::tags::read(&path);
@@ -121,6 +187,10 @@ fn track_from_tags(path: PathBuf) -> GuestTrack {
 /// `path` when it is a file inside the stick at `root`, else `None`. A path with a `..`
 /// component, an absolute path elsewhere and a symlink out of the stick are all refused, so a
 /// crafted stick cannot make the app read the owner's own files as guest tracks.
+///
+/// The check is on the canonical path, but the path returned is `path` as given, not the
+/// canonical one: it may pass through links inside the stick, so a caller must not treat it
+/// as canonical (canonicalise it first when that matters).
 pub(crate) fn on_stick(root: &Path, path: &Path) -> Option<PathBuf> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return None;

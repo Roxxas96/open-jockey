@@ -21,6 +21,12 @@ Changes from the stick, so the repo carries no personal data and stays small:
   - 120.wav: cue 1 10944 ms #CC0000, cue 2 26161 ms #CC8800, cue 3 44277 ms #0000CC, cue 4 35786 ms #CCCC00.
   - 126.mp3: cue 1 7954 ms #CC0000, cue 2 29418 ms #CC8800, cue 3 44451 ms #0000CC.
   - 128.mp3: cue 1 6465 ms #CC0000, cue 2 26850 ms #CC8800, cue 3 42504 ms #0000CC, cue 4 17751 ms #CCCC00.
+  - grids, in each file's `Serato Tempo Map` tag (version 2; a big-endian `f64` beat position at byte 4
+    and the BPM at byte 24, read off these files; the database's `tbpm` holds the rounded BPM):
+    120.wav 0.499423 s at 119.995584 BPM, 126.mp3 0.531400 s at 126.000728 BPM, 128.mp3 0.523970 s at
+    127.998569 BPM. Positions are as Serato stores them: an MP3's still includes the Info-frame shift its
+    cues have. The WAV's audio clicks on each beat from 0 s, so 0.499423 s is its second beat, about
+    0.6 ms early (VirtualDJ's `Phase` puts the beat 0.5 ms early too).
 - **rekordbox device library** (`PIONEER/rekordbox/export.pdb`, `PIONEER/USBANLZ`, files under `Contents/`):
   - playlist `OJ Rekordbox A` = 120, 128, 126 (the same as `rekordbox.xml`).
   - grids: 120.wav at **149.96 BPM** (rekordbox misread it; a real wrong grid), 126 at 126.00, 128 at 128.00.

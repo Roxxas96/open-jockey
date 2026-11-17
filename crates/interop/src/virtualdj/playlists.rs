@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 
-use super::{InteropError, read_file};
+use super::{InteropError, read_file_capped};
 
 /// A playlist; `name` is `Folder / Name` when nested.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,12 +25,22 @@ pub fn read_playlists(
     list_dirs: &[PathBuf],
     order: Option<&Path>,
 ) -> Result<(Vec<VdjPlaylist>, Vec<InteropError>), InteropError> {
+    read_playlists_capped(list_dirs, order, None)
+}
+
+/// [`read_playlists`], refusing any list or order file of more than `max` bytes when given
+/// (an error in the second list, like any other unreadable file).
+pub(crate) fn read_playlists_capped(
+    list_dirs: &[PathBuf],
+    order: Option<&Path>,
+    max: Option<u64>,
+) -> Result<(Vec<VdjPlaylist>, Vec<InteropError>), InteropError> {
     let mut playlists = Vec::new();
     let mut errors = Vec::new();
     let mut first_open_failure = None;
     let mut opened = 0;
     for dir in list_dirs {
-        match collect(dir, dir, 0, &mut playlists, &mut errors) {
+        match collect(dir, dir, (0, max), &mut playlists, &mut errors) {
             Ok(()) => opened += 1,
             Err(e) => first_open_failure = first_open_failure.or(Some(e)),
         }
@@ -41,7 +51,7 @@ pub fn read_playlists(
         return Err(e);
     }
     errors.extend(first_open_failure);
-    let order_lines: Vec<String> = match order.map(read_file) {
+    let order_lines: Vec<String> = match order.map(|o| read_file_capped(o, max)) {
         Some(Ok(bytes)) => String::from_utf8_lossy(&bytes)
             .lines()
             .map(|l| l.trim().replace('\\', "/"))
@@ -64,14 +74,16 @@ pub fn read_playlists(
     Ok((playlists, errors))
 }
 
-/// Fails only when `dir` itself cannot be listed; problems below it go to `errors`.
+/// Fails only when `dir` itself cannot be listed; problems below it go to `errors`. `at` is
+/// the folder depth and the size cap of a list file.
 fn collect(
     root: &Path,
     dir: &Path,
-    depth: usize,
+    at: (usize, Option<u64>),
     out: &mut Vec<VdjPlaylist>,
     errors: &mut Vec<InteropError>,
 ) -> Result<(), InteropError> {
+    let (depth, max) = at;
     let io = |source| InteropError::Io {
         path: dir.to_path_buf(),
         source,
@@ -93,7 +105,7 @@ fn collect(
         }
         if kind.is_dir() {
             if depth < MAX_DEPTH
-                && let Err(e) = collect(root, &path, depth + 1, out, errors)
+                && let Err(e) = collect(root, &path, (depth + 1, max), out, errors)
             {
                 errors.push(e);
             }
@@ -104,8 +116,8 @@ fn collect(
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase);
         let read = match ext.as_deref() {
-            Some("vdjfolder") => read_vdjfolder(&path),
-            Some("m3u") => read_m3u(&path),
+            Some("vdjfolder") => read_vdjfolder(&path, max),
+            Some("m3u") => read_m3u(&path, max),
             _ => continue,
         };
         match read {
@@ -128,8 +140,8 @@ fn playlist_name(root: &Path, file: &Path) -> String {
         .join(" / ")
 }
 
-fn read_vdjfolder(path: &Path) -> Result<Vec<PathBuf>, InteropError> {
-    let bytes = read_file(path)?;
+fn read_vdjfolder(path: &Path, max: Option<u64>) -> Result<Vec<PathBuf>, InteropError> {
+    let bytes = read_file_capped(path, max)?;
     let format = |why: String| InteropError::Format {
         path: path.to_path_buf(),
         why,
@@ -170,8 +182,8 @@ fn read_vdjfolder(path: &Path) -> Result<Vec<PathBuf>, InteropError> {
     Ok(paths)
 }
 
-fn read_m3u(path: &Path) -> Result<Vec<PathBuf>, InteropError> {
-    let text = String::from_utf8_lossy(&read_file(path)?).into_owned();
+fn read_m3u(path: &Path, max: Option<u64>) -> Result<Vec<PathBuf>, InteropError> {
+    let text = String::from_utf8_lossy(&read_file_capped(path, max)?).into_owned();
     let base = path.parent().unwrap_or(Path::new(""));
     Ok(text
         .lines()
