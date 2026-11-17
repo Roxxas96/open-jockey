@@ -1,7 +1,7 @@
 //! Reads the committed guest-stick fixture's VirtualDJ branch.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use interop::guest::{GuestApp, GuestSource, GuestStick, read_stick};
 
@@ -120,8 +120,9 @@ fn paths_on_another_mount_name_map_to_the_stick() {
     }
 }
 
-/// Writes `text` over the VirtualDJ list of a temp copy of the fixture and returns its root.
-fn stick_with_outside(dir: &Path, outside: &Path) -> PathBuf {
+/// A temp copy of the fixture whose VirtualDJ list and database also name `outside` and a
+/// `..` escape to it, each written as `spell` writes a path; returns the copy's root.
+fn stick_with_outside(dir: &Path, outside: &Path, spell: fn(&Path) -> String) -> PathBuf {
     let root = dir.join("OJGUEST");
     copy_dir(&fixture(), &root);
     let list = root
@@ -130,7 +131,7 @@ fn stick_with_outside(dir: &Path, outside: &Path) -> PathBuf {
         .join("OJ VDJ A.vdjfolder");
     let escape = root.join("..").join("outside.wav");
     let mut text = fs::read_to_string(&list).unwrap();
-    let entry = |p: &Path| format!("<song path=\"{}\" />\n", p.display());
+    let entry = |p: &Path| format!("<song path=\"{}\" />\n", spell(p));
     let extra = format!("{}{}", entry(outside), entry(&escape));
     text = text.replace("</VirtualFolder>", &format!("{extra}</VirtualFolder>"));
     fs::write(&list, text).unwrap();
@@ -138,8 +139,8 @@ fn stick_with_outside(dir: &Path, outside: &Path) -> PathBuf {
     let mut text = fs::read_to_string(&db).unwrap();
     let songs = format!(
         "<Song FilePath=\"{}\"><Tags Title=\"Evil\" /></Song>\n<Song FilePath=\"{}\"><Tags Title=\"Evil2\" /></Song>\n",
-        outside.display(),
-        escape.display()
+        spell(outside),
+        spell(&escape)
     );
     text = text.replace(
         "</VirtualDJ_Database>",
@@ -148,6 +149,27 @@ fn stick_with_outside(dir: &Path, outside: &Path) -> PathBuf {
     fs::write(&db, text).unwrap();
     root
 }
+
+/// `path` as this platform writes it.
+fn native(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// `path` as VirtualDJ on Windows writes it: `C:/` and the parts after the drive or root.
+fn drive_letter(path: &Path) -> String {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::ParentDir => Some("..".to_owned()),
+            _ => None,
+        })
+        .collect();
+    format!("C:/{}", parts.join("/"))
+}
+
+const DROPPED: &str =
+    "2 playlist entries in VirtualDJ/MyLists point at files that are not on this stick";
 
 fn nothing_evil(source: &GuestSource) {
     for track in &source.tracks {
@@ -163,13 +185,42 @@ fn a_path_outside_the_stick_is_never_read() {
     let dir = tempfile::tempdir().unwrap();
     let outside = dir.path().join("outside.wav");
     fs::copy(fixture().join("Serato").join("OJ Click 120.wav"), &outside).unwrap();
-    let root = stick_with_outside(dir.path(), &outside);
+    let root = stick_with_outside(dir.path(), &outside, native);
     let stick = read_stick(&root, "OJGUEST");
     let source = vdj(&stick);
     nothing_evil(source);
     assert_eq!(source.playlists[0].tracks.len(), 3);
     let problem = source.problem.as_deref().expect("a problem");
-    assert!(problem.contains("outside this stick"), "{problem}");
+    // A per-drive database's `X:/` is the drive's own root (VirtualDJ's convention), so on
+    // Windows `C:\…\outside.wav` names `<stick>\…\outside.wav`: a song whose file is not on
+    // the stick, skipped like any other missing one. Elsewhere the path is absolute, and
+    // its file exists outside the stick.
+    if cfg!(windows) {
+        assert_eq!(problem, DROPPED);
+    } else {
+        assert_eq!(
+            problem,
+            format!("2 database songs are outside this stick; {DROPPED}")
+        );
+    }
+}
+
+/// The Windows case of [`a_path_outside_the_stick_is_never_read`], on every platform: the
+/// paths are written `C:/…`, as VirtualDJ on Windows writes them.
+#[test]
+fn a_drive_letter_path_outside_the_stick_is_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.wav");
+    fs::copy(fixture().join("Serato").join("OJ Click 120.wav"), &outside).unwrap();
+    let root = stick_with_outside(dir.path(), &outside, drive_letter);
+    let stick = read_stick(&root, "OJGUEST");
+    let source = vdj(&stick);
+    nothing_evil(source);
+    assert_eq!(source.playlists[0].tracks.len(), 3);
+    // The database's `C:/…` songs map onto the stick, where they are missing; the list
+    // entries match no file on it. Neither reaches the file outside.
+    assert_eq!(source.problem.as_deref(), Some(DROPPED));
+    assert!(source.tracks.iter().all(|t| t.path.starts_with(&root)));
 }
 
 #[cfg(unix)]
