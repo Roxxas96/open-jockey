@@ -81,8 +81,10 @@ fn list_text(frame: &ControlFrame, with_length: bool) -> String {
     if view.all_selected {
         return format!("{} selected", grouped(n));
     }
-    if view.playlist.is_none() {
-        let node = view.tree.get(view.tree_cursor);
+    let node = view.tree.get(view.tree_cursor);
+    // A guest stick's list reads like a playlist, though the browser holds none.
+    let guest_list = node.is_some_and(|row| row.kind == TreeKind::GuestList);
+    if view.playlist.is_none() && !guest_list {
         if node.is_some_and(|row| row.kind == TreeKind::Playlists) {
             return String::new();
         }

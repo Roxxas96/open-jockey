@@ -887,7 +887,12 @@ fn tree_target(entry: &TreeRow) -> Option<DeleteTarget> {
     match entry.kind {
         TreeKind::Playlist => entry.playlist.map(|id| DeleteTarget::Playlist { id }),
         TreeKind::Folder => entry.path.clone().map(|path| DeleteTarget::Folder { path }),
-        TreeKind::Drive | TreeKind::Playlists => None,
+        // A guest stick is never changed: its rows have no delete.
+        TreeKind::Drive
+        | TreeKind::Playlists
+        | TreeKind::GuestStick
+        | TreeKind::GuestBranch
+        | TreeKind::GuestList => None,
     }
 }
 
@@ -944,7 +949,7 @@ fn tree_row(ui: &mut Ui, rect: Rect, entry: &TreeRow) -> Option<Rect> {
     let mid = rect.center().y;
     let mut arrow = None;
     // Only the nodes that can open get a triangle.
-    if entry.kind != TreeKind::Playlist {
+    if !matches!(entry.kind, TreeKind::Playlist | TreeKind::GuestList) {
         arrow = Some(Rect::from_center_size(
             pos2(x + 4.0, mid),
             vec2(12.0, rect.height()),
@@ -972,7 +977,7 @@ fn tree_row(ui: &mut Ui, rect: Rect, entry: &TreeRow) -> Option<Rect> {
     glyph(ui, entry.kind, pos2(x + 16.0, mid));
     let label_x = x + 28.0;
     let width = (rect.max.x - label_x - 2.0).max(0.0);
-    let Some(note) = entry.note else {
+    let Some(note) = entry.note.as_deref() else {
         cell(ui, rect, label_x, width, RichText::new(&entry.label));
         return arrow;
     };
@@ -997,18 +1002,18 @@ fn glyph(ui: &Ui, kind: TreeKind, at: egui::Pos2) {
     let painter = ui.painter();
     let colour = p.text_dim;
     match kind {
-        TreeKind::Drive => {
+        TreeKind::Drive | TreeKind::GuestStick => {
             let body = Rect::from_center_size(at, vec2(11.0, 6.0));
             painter.rect_filled(body, CornerRadius::same(1), colour);
             painter.circle_filled(body.right_center() - vec2(2.0, 0.0), 0.9, p.background);
         }
-        TreeKind::Folder => {
+        TreeKind::Folder | TreeKind::GuestBranch => {
             let body = Rect::from_center_size(at + vec2(0.0, 1.0), vec2(11.0, 7.0));
             painter.rect_filled(body, CornerRadius::same(1), colour);
             let tab = Rect::from_min_size(body.min - vec2(0.0, 2.0), vec2(5.0, 2.5));
             painter.rect_filled(tab, CornerRadius::same(1), colour);
         }
-        TreeKind::Playlists | TreeKind::Playlist => {
+        TreeKind::Playlists | TreeKind::Playlist | TreeKind::GuestList => {
             for line in [-3.0, 0.0, 3.0] {
                 let from = at + vec2(-5.0, line);
                 painter.line_segment([from, from + vec2(10.0, 0.0)], Stroke::new(1.5, colour));

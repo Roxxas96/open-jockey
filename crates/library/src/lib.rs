@@ -25,7 +25,8 @@ mod writer;
 
 pub use browser::{
     BROWSER_PAGE_ROWS, Browser, BrowserEdit, BrowserRequest, BrowserView, Drive, Focus,
-    GuestMarkers, ListIdentity, ListRow, TreeKind, TreeRow, drives, guest_markers, remix_of,
+    GuestBranch, GuestList, GuestMarkers, GuestNode, ListIdentity, ListRow, TreeKind, TreeRow,
+    drives, guest_markers, remix_of,
 };
 pub use covers::{COVERS_RETRY_MISSED, CoverQuery, CoverRow, CoverState, cover_files};
 pub use cues::HotcuePoint;

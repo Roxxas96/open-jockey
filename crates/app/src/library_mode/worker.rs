@@ -266,6 +266,14 @@ fn run(
             return;
         }
     };
+    // Sticks already plugged in (the store may be shared with an earlier worker's).
+    let sticks = Arc::clone(&watching.sticks);
+    let mut guests_seen = sticks.generation();
+    if guests_seen > 0
+        && let Err(e) = browser.set_guests(sticks.nodes())
+    {
+        say(format!("warning: library browser: {}", safe(e)));
+    }
     let _ = events.send(Event::Browser(browser.view()));
     // What a delete never takes: Open Jockey's own folders.
     let own = delete::own_folders(lib.path());
@@ -298,6 +306,19 @@ fn run(
             last_scan = Some(Instant::now());
             watcher.scan();
         }
+        // A stick came or went (found by the reader thread, or just dropped by the scan):
+        // the browser shows the sticks as they are now.
+        let generation = sticks.generation();
+        if generation != guests_seen {
+            guests_seen = generation;
+            match browser.set_guests(sticks.nodes()) {
+                Ok(view) => {
+                    let _ = events.send(Event::Browser(view));
+                    adder.offer(&browser);
+                }
+                Err(e) => say(format!("warning: library browser: {}", safe(e))),
+            }
+        }
         let job = match jobs.recv_timeout(CHECK_EVERY) {
             Ok(job) => job,
             Err(RecvTimeoutError::Timeout) => continue,
@@ -317,6 +338,10 @@ fn run(
                 }
                 match browser.list_track_ids() {
                     Ok(tracks) => {
+                        if let Err(refusal) = super::playlist_edits::refuse_guests(&tracks) {
+                            say(refusal.to_owned());
+                            continue;
+                        }
                         Job::EditPlaylist(super::playlist_edits::append(playlist, &tracks))
                     }
                     Err(e) => {
@@ -662,6 +687,12 @@ fn request_load(
     say: &dyn Fn(String),
 ) {
     let n = deck_number(deck);
+    // Task 8 loads a guest track from its stick; until then a guest id has no file to give.
+    if GuestSticks::is_guest(track) {
+        return say(format!(
+            "Deck {n}: loading a guest track is not available yet"
+        ));
+    }
     let details = match reader.track(track) {
         Ok(Some(details)) => details,
         Ok(None) => return say(format!("Deck {n}: there is no track {track}")),
@@ -954,6 +985,157 @@ mod tests {
         wait_for(&events, |e| matches!(e, Event::FolderAdded).then_some(()));
         assert_eq!(ids(&lib).len(), 1);
         adder.stop();
+    }
+
+    /// A stick at `root` with one Serato source: two tracks, and the crate "Crate" holding
+    /// both.
+    fn serato_stick(root: &Path) -> interop::guest::GuestStick {
+        use interop::guest::{GuestApp, GuestPlaylist, GuestSource, GuestStick, GuestTrack};
+        let track = |name: &str| GuestTrack {
+            path: root.join(name),
+            title: Some(name.to_owned()),
+            artist: None,
+            album: None,
+            bpm: Some(120.0),
+            first_beat: None,
+            main_cue: None,
+            hotcues: Vec::new(),
+        };
+        GuestStick {
+            root: root.to_owned(),
+            name: "STICK".to_owned(),
+            sources: vec![GuestSource {
+                app: GuestApp::Serato,
+                tracks: vec![track("a.mp3"), track("b.mp3")],
+                playlists: vec![GuestPlaylist {
+                    name: "Crate".to_owned(),
+                    tracks: vec![0, 1],
+                }],
+                problem: None,
+            }],
+        }
+    }
+
+    /// Plugs `stick` into `sticks` as the stick reader would.
+    fn plug_in(sticks: &GuestSticks, stick: &interop::guest::GuestStick) {
+        let plug = sticks.expect(&stick.root);
+        assert!(sticks.add(stick, plug));
+    }
+
+    /// A worker browsing the drive "STICK" at a temp folder, with `sticks` for its guests.
+    fn guest_worker(
+        sticks: &Arc<GuestSticks>,
+    ) -> (tempfile::TempDir, PathBuf, Sender<Job>, Receiver<Event>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap().join("STICK");
+        std::fs::create_dir_all(&root).unwrap();
+        let lib = Library::open(&dir.path().join("library.sqlite3")).unwrap();
+        let (tx, rx) = channel();
+        let drive = Drive {
+            name: "STICK".to_owned(),
+            path: root.clone(),
+        };
+        let watching = Watching {
+            mounts: Mounts::default(),
+            sticks: Arc::clone(sticks),
+        };
+        let (jobs, _worker) = spawn_watching(
+            Arc::new(lib),
+            tx,
+            decode::decode_file,
+            move || vec![drive.clone()],
+            no_trash(),
+            watching,
+        )
+        .unwrap();
+        (dir, root, jobs, rx)
+    }
+
+    /// The labels of `view`'s tree rows that are `kind`.
+    fn labels_of(view: &BrowserView, kind: library::TreeKind) -> Vec<String> {
+        view.tree
+            .iter()
+            .filter(|r| r.kind == kind)
+            .map(|r| r.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_browser_follows_the_sticks_plugged_in_and_removed() {
+        let sticks = Arc::new(GuestSticks::default());
+        let (_dir, root, _jobs, rx) = guest_worker(&sticks);
+        let kind = library::TreeKind::GuestList;
+        // The first view has no stick: the plain drive.
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) => Some(v),
+            _ => None,
+        });
+        assert!(labels_of(&view, kind).is_empty());
+        // Plugged in: the stick takes the drive's place, with its branch and crate.
+        plug_in(&sticks, &serato_stick(&root));
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) if !labels_of(&v, kind).is_empty() => Some(v),
+            _ => None,
+        });
+        assert_eq!(labels_of(&view, kind), ["Crate"]);
+        assert_eq!(labels_of(&view, library::TreeKind::GuestBranch), ["Serato"]);
+        assert_eq!(labels_of(&view, library::TreeKind::GuestStick), ["STICK"]);
+        assert!(labels_of(&view, library::TreeKind::Drive).is_empty());
+        // Removed: the plain drive is back.
+        sticks.remove(&root);
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) if labels_of(&v, kind).is_empty() => Some(v),
+            _ => None,
+        });
+        assert_eq!(labels_of(&view, library::TreeKind::Drive), ["STICK"]);
+    }
+
+    #[test]
+    fn a_whole_guest_list_is_not_added_to_a_playlist() {
+        let sticks = Arc::new(GuestSticks::default());
+        let (_dir, root, jobs, rx) = guest_worker(&sticks);
+        plug_in(&sticks, &serato_stick(&root));
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) if !labels_of(&v, library::TreeKind::GuestList).is_empty() => Some(v),
+            _ => None,
+        });
+        let at = view
+            .tree
+            .iter()
+            .position(|r| r.kind == library::TreeKind::GuestList)
+            .unwrap();
+        jobs.send(Job::Edit(BrowserEdit::SelectTree(at))).unwrap();
+        jobs.send(Job::Edit(BrowserEdit::SelectAll)).unwrap();
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) if v.all_selected => Some(v),
+            _ => None,
+        });
+        assert_eq!(view.list_count, 2);
+        jobs.send(Job::AddListToPlaylist {
+            playlist: 1,
+            list: view.identity(),
+        })
+        .unwrap();
+        let said = wait_for(&rx, message);
+        assert_eq!(said, "Guest tracks can't be added to your playlists");
+    }
+
+    #[test]
+    fn loading_a_guest_row_says_it_cannot_yet() {
+        let sticks = Arc::new(GuestSticks::default());
+        let (_dir, root, jobs, rx) = guest_worker(&sticks);
+        let stick = serato_stick(&root);
+        plug_in(&sticks, &stick);
+        let id = sticks.sticks()[0].sources[0].tracks[0];
+        jobs.send(Job::LoadTrack {
+            deck: deck(1),
+            track: id,
+            seq: 1,
+            refuse_if_playing: false,
+        })
+        .unwrap();
+        let said = wait_for(&rx, message);
+        assert_eq!(said, "Deck 1: loading a guest track is not available yet");
     }
 
     fn message(event: Event) -> Option<String> {

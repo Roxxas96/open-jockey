@@ -10,7 +10,19 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use engine::TrackMemory;
 use interop::guest::{GuestApp, GuestStick, GuestTrack};
-use library::TrackRow;
+use library::{GuestBranch, GuestList, GuestNode, TrackRow};
+
+use crate::format::safe;
+
+/// What an app's branch is called in the browser.
+fn app_label(app: GuestApp) -> &'static str {
+    match app {
+        GuestApp::Serato => "Serato",
+        GuestApp::RekordboxDevice => "rekordbox",
+        GuestApp::RekordboxXml => "rekordbox (xml)",
+        GuestApp::VirtualDj => "VirtualDJ",
+    }
+}
 
 /// A stick as the browser lists it.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +73,8 @@ struct Inner {
     /// Sticks being read, with the number of the plug-in that asked.
     expected: HashMap<PathBuf, u64>,
     plugs: u64,
+    /// Grows with every stick added or removed.
+    generation: u64,
     sticks: Vec<StickSummary>,
     tracks: HashMap<i64, GuestTrackRef>,
     hotcues: HashMap<i64, TrackMemory>,
@@ -68,15 +82,58 @@ struct Inner {
 
 impl GuestSticks {
     /// Whether `id` is a guest track's: a library id is never below zero.
-    #[allow(dead_code, reason = "the guest loader of task 8")]
     pub fn is_guest(id: i64) -> bool {
         id < 0
     }
 
     /// The sticks, in the order they were read.
-    #[allow(dead_code, reason = "the browser rows of task 7")]
     pub fn sticks(&self) -> Vec<StickSummary> {
         self.lock().sticks.clone()
+    }
+
+    /// The sticks as the browser lists them: each app's branch with its lists, the names
+    /// cleaned of control characters. Reads the rows one list at a time, so no lock is held
+    /// long.
+    pub fn nodes(&self) -> Vec<GuestNode> {
+        let sticks = self.sticks();
+        sticks
+            .into_iter()
+            .map(|stick| GuestNode {
+                name: safe(&stick.name),
+                root: stick.root,
+                branches: stick
+                    .sources
+                    .iter()
+                    .map(|source| GuestBranch {
+                        label: app_label(source.app).to_owned(),
+                        note: source.problem.as_ref().map(safe),
+                        lists: source
+                            .playlists
+                            .iter()
+                            .map(|(name, ids)| GuestList {
+                                name: safe(name),
+                                rows: self.rows(ids),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// How many times the set of sticks changed: a stick was added or removed.
+    pub fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    /// The path and browser row of each of `ids` still plugged in, in order, under one
+    /// short lock.
+    pub fn rows(&self, ids: &[i64]) -> Vec<(PathBuf, TrackRow)> {
+        let inner = self.lock();
+        ids.iter()
+            .filter_map(|id| inner.tracks.get(id))
+            .map(|t| (t.path.clone(), t.row.clone()))
+            .collect()
     }
 
     /// The guest track `id`, or `None` for an unknown id or one whose stick was removed.
@@ -165,6 +222,7 @@ impl GuestSticks {
             name: stick.name.clone(),
             sources,
         });
+        inner.generation += 1;
         true
     }
 
@@ -175,6 +233,7 @@ impl GuestSticks {
         inner.expected.remove(root);
         let at = inner.sticks.iter().position(|s| s.root == root)?;
         let stick = inner.sticks.remove(at);
+        inner.generation += 1;
         for id in stick.sources.iter().flat_map(|s| &s.tracks) {
             inner.tracks.remove(id);
             inner.hotcues.remove(id);

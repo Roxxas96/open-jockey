@@ -6,6 +6,21 @@
 
 use library::WriteOp;
 
+use crate::guest::GuestSticks;
+
+/// The refusal when guest tracks are dropped on, or added to, a playlist.
+pub(super) const GUEST_DROP: &str = "Guest tracks can't be added to your playlists";
+
+/// Refuses `tracks` when any is a guest track (an id below zero): a guest stick's tracks
+/// never reach the owner's playlists.
+pub(super) fn refuse_guests(tracks: &[i64]) -> Result<(), &'static str> {
+    if tracks.iter().any(|&t| GuestSticks::is_guest(t)) {
+        Err(GUEST_DROP)
+    } else {
+        Ok(())
+    }
+}
+
 /// Appends `tracks` to `playlist`, in their order.
 pub(super) fn append(playlist: i64, tracks: &[i64]) -> WriteOp {
     let ops = tracks.iter().map(|&track| WriteOp::AddToPlaylist {

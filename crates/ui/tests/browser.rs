@@ -712,6 +712,26 @@ fn clicking_the_tree_selects_and_opens() {
 }
 
 #[test]
+fn a_guest_stick_draws_its_branches_and_a_list_click_selects_it() {
+    let mut view = view();
+    let mut branch = tree_row("Serato", 1, TreeKind::GuestBranch);
+    branch.note = Some("2 crates could not be read".into());
+    view.tree = vec![
+        tree_row("OJGUEST", 0, TreeKind::GuestStick),
+        branch,
+        tree_row("OJ Serato A", 2, TreeKind::GuestList),
+    ];
+    view.tree_cursor = 0;
+    let mut harness = clicking(view, Decks::default());
+    harness.get_by_label("OJGUEST");
+    harness.get_by_label("Serato");
+    harness.get_by_label("2 crates could not be read");
+    let list = at_label(&harness, "OJ Serato A");
+    click(&mut harness, list);
+    assert_eq!(harness.state().steps, [browse(BrowserEdit::SelectTree(2))]);
+}
+
+#[test]
 fn the_arrow_of_a_node_that_cannot_open_selects_it() {
     let mut view = view();
     let mut playlists = tree_row("Playlists", 0, TreeKind::Playlists);
