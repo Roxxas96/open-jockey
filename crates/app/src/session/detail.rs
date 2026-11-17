@@ -1,6 +1,8 @@
 //! The waveforms and hotcue marks of the tracks on the decks, found off the control thread:
 //! the stored overview and the hotcues' colours and names are read from the library and the
-//! detailed waveform is computed from the decoded track, on a thread of their own.
+//! detailed waveform is computed from the decoded track, on a thread of their own. A guest
+//! track has nothing in the library: its marks are its deck's, and its overview is the
+//! detailed waveform of the decoded track.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -11,6 +13,8 @@ use analysis::Waveform;
 use engine::{HotcueSlot, TrackBuffer};
 use library::Library;
 use ui::HotcueMark;
+
+use crate::guest::GuestSticks;
 
 /// Frames per bucket of the detailed waveform.
 const DETAIL_FRAMES_PER_BUCKET: u32 = 128;
@@ -206,11 +210,14 @@ impl DetailJobs {
                             part,
                         })
                     };
-                    if send(Part::Marks(read_marks(job.track_id).map(Arc::new))).is_err() {
+                    let guest = GuestSticks::is_guest(job.track_id);
+                    let marks = (!guest).then(|| read_marks(job.track_id)).flatten();
+                    if send(Part::Marks(marks.map(Arc::new))).is_err() {
                         return;
                     }
                     let Some(audio) = &job.audio else { continue };
-                    let overview = read_overview(job.track_id).map(Arc::new);
+                    let overview = (!guest).then(|| read_overview(job.track_id)).flatten();
+                    let overview = overview.map(Arc::new);
                     if send(Part::Overview(overview)).is_err() {
                         return;
                     }
@@ -461,6 +468,31 @@ mod tests {
         // A deck with nothing loaded has nothing to read again.
         jobs.empty(0);
         jobs.refresh_marks();
+        assert_eq!(*jobs.marks(0, 1), Marks::default());
+    }
+
+    #[test]
+    fn a_guest_track_reads_nothing_from_the_library() {
+        use std::time::{Duration, Instant};
+        let mut jobs = DetailJobs::start(
+            |track| panic!("the overview of track {track} was read"),
+            |track| panic!("the marks of track {track} were read"),
+            |_| Waveform {
+                frames_per_bucket: 128,
+                buckets: vec![[1, 2, 3, 4]],
+            },
+        );
+        let audio = Arc::new(TrackBuffer::new(44_100, vec![0.0; 2 * 441]).unwrap());
+        jobs.observe(0, 1, -3, &audio);
+        let until = Instant::now() + Duration::from_secs(5);
+        // The overview is the detailed waveform of the decoded track.
+        while jobs.waveforms(0, 1).0.is_none() {
+            assert!(Instant::now() < until, "no overview came");
+            std::thread::sleep(Duration::from_millis(5));
+            jobs.collect();
+        }
+        let (overview, detail) = jobs.waveforms(0, 1);
+        assert!(Arc::ptr_eq(&overview.unwrap(), &detail.unwrap()));
         assert_eq!(*jobs.marks(0, 1), Marks::default());
     }
 

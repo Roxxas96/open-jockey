@@ -883,6 +883,24 @@ fn the_track_menu_finds_and_removes_looked_up_covers() {
     }
 }
 
+#[test]
+fn a_guest_track_menu_has_its_cover_items_disabled() {
+    let mut view = numbered(0, 20, 20);
+    view.list[1].track.as_mut().unwrap().id = -4;
+    let mut harness = clicking(view, Decks::default());
+    let at = at_label(&harness, "Song 1");
+    click_with(&mut harness, PointerButton::Secondary, at);
+    harness.run_steps(2);
+    for label in ["Find another cover", "Remove cover"] {
+        let item = harness.get_by_label(label);
+        assert!(item.accesskit_node().is_disabled(), "{label}");
+    }
+    let item = at_label(&harness, "Remove cover");
+    click(&mut harness, item);
+    harness.run_steps(2);
+    assert!(harness.state().steps.is_empty());
+}
+
 fn wheel<S>(harness: &mut Harness<'_, S>, at: Pos2, lines: f32) {
     harness.event(Event::PointerMoved(at));
     harness.run_steps(1);

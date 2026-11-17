@@ -1426,6 +1426,14 @@ fn track_menu(
     {
         delete_dialog::open(ui.ctx(), target, steps);
     }
+    // A guest stick's track (a negative id) has no cover to look up or remove: nothing of
+    // it is kept.
+    if track.id < 0 {
+        ui.separator();
+        ui.add_enabled(false, Button::new("Find another cover"));
+        ui.add_enabled(false, Button::new("Remove cover"));
+        return;
+    }
     // A cover looked up online, a lookup that found none, or a removed cover: this row's
     // track alone. A missing track (its file in the Trash) keeps its cover but is not
     // looked up.

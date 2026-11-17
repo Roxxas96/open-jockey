@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use engine::TrackMemory;
+use engine::{HOTCUES, TrackMemory};
 use interop::guest::{GuestApp, GuestStick, GuestTrack};
 use library::{GuestBranch, GuestList, GuestNode, TrackRow};
+use ui::HotcueMark;
 
 use crate::format::safe;
 
@@ -23,6 +24,9 @@ fn app_label(app: GuestApp) -> &'static str {
         GuestApp::VirtualDj => "VirtualDJ",
     }
 }
+
+/// A track's hotcue colours and names, slot by slot.
+pub type HotcueMarks = [Option<HotcueMark>; HOTCUES];
 
 /// A stick as the browser lists it.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +82,10 @@ struct Inner {
     sticks: Vec<StickSummary>,
     tracks: HashMap<i64, GuestTrackRef>,
     hotcues: HashMap<i64, TrackMemory>,
+    /// The session's hotcue colours and names, per track.
+    marks: HashMap<i64, HotcueMarks>,
+    /// The sticks removed, as the lowest and highest id they had and their name.
+    gone: Vec<(i64, i64, String)>,
 }
 
 impl GuestSticks {
@@ -137,19 +145,49 @@ impl GuestSticks {
     }
 
     /// The guest track `id`, or `None` for an unknown id or one whose stick was removed.
-    #[allow(dead_code, reason = "the guest loader of task 8")]
     pub fn track(&self, id: i64) -> Option<GuestTrackRef> {
         self.lock().tracks.get(&id).cloned()
     }
 
     /// Keeps `memory` as the session's hotcues of guest track `id`; it dies with the stick.
     /// An id that is not a track of a plugged-in stick is ignored.
-    #[allow(dead_code, reason = "the guest loader of task 8")]
     pub fn set_hotcues(&self, id: i64, memory: TrackMemory) {
         let mut inner = self.lock();
         if inner.tracks.contains_key(&id) {
             inner.hotcues.insert(id, memory);
         }
+    }
+
+    /// The session's hotcues of guest track `id` ([`set_hotcues`](Self::set_hotcues)), which
+    /// win over the stick's own; `None` when there are none or the stick was removed.
+    pub fn hotcues(&self, id: i64) -> Option<TrackMemory> {
+        self.lock().hotcues.get(&id).copied()
+    }
+
+    /// Keeps `marks` as the session's hotcue colours and names of guest track `id`, as
+    /// [`set_hotcues`](Self::set_hotcues) keeps its hotcues.
+    pub fn set_marks(&self, id: i64, marks: HotcueMarks) {
+        let mut inner = self.lock();
+        if inner.tracks.contains_key(&id) {
+            inner.marks.insert(id, marks);
+        }
+    }
+
+    /// The session's hotcue colours and names of guest track `id`
+    /// ([`set_marks`](Self::set_marks)).
+    pub fn marks(&self, id: i64) -> Option<HotcueMarks> {
+        self.lock().marks.get(&id).cloned()
+    }
+
+    /// The name of the removed stick guest track `id` was on; `None` when it was never
+    /// handed out or its stick is still plugged in.
+    pub fn gone_stick(&self, id: i64) -> Option<String> {
+        let inner = self.lock();
+        inner
+            .gone
+            .iter()
+            .find(|(low, high, _)| (*low..=*high).contains(&id))
+            .map(|(_, _, name)| name.clone())
     }
 
     /// Notes that the stick at `root` is being read; the number goes back with the result.
@@ -234,9 +272,14 @@ impl GuestSticks {
         let at = inner.sticks.iter().position(|s| s.root == root)?;
         let stick = inner.sticks.remove(at);
         inner.generation += 1;
-        for id in stick.sources.iter().flat_map(|s| &s.tracks) {
+        let ids = stick.sources.iter().flat_map(|s| &s.tracks);
+        if let (Some(&low), Some(&high)) = (ids.clone().min(), ids.clone().max()) {
+            inner.gone.push((low, high, stick.name.clone()));
+        }
+        for id in ids {
             inner.tracks.remove(id);
             inner.hotcues.remove(id);
+            inner.marks.remove(id);
         }
         Some(stick.name)
     }
@@ -330,6 +373,9 @@ mod tests {
         store.set_hotcues(first[0], TrackMemory::default());
         assert_eq!(store.remove(&s.root).as_deref(), Some("S"));
         assert!(store.track(first[0]).is_none());
+        // A removed stick's ids still name it; one never handed out names none.
+        assert_eq!(store.gone_stick(first[1]).as_deref(), Some("S"));
+        assert_eq!(store.gone_stick(-99), None);
         assert!(store.sticks().is_empty());
         plug(&store, &s);
         let second = store.sticks()[0].sources[0].tracks.clone();

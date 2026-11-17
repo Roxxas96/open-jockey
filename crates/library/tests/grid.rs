@@ -479,3 +479,50 @@ fn the_decoded_rate_is_preferred_over_the_tag_rate() {
         "{err}"
     );
 }
+
+#[test]
+fn a_grid_edited_in_memory_writes_nothing() {
+    let s = setup();
+    let current = Beatgrid {
+        bpm: Some(120.0),
+        first_beat_frames: Some(100.0),
+        grid_locked: false,
+    };
+    // 120 BPM at 44.1 kHz: 22 050 frames a beat.
+    let shifted = s
+        .lib
+        .edit_grid_in_memory(
+            -3,
+            current,
+            GridEdit::Shift { frames: -200.0 },
+            None,
+            44_100,
+        )
+        .unwrap();
+    assert_eq!(shifted.bpm, Some(120.0));
+    assert_eq!(shifted.first_beat_frames, Some(22_050.0 - 100.0));
+    // Taps count as on the library's tracks.
+    let mut tapped = current;
+    for at in [0, 500_000, 1_000_000, 1_500_000] {
+        tapped = s
+            .lib
+            .edit_grid_in_memory(-3, current, GridEdit::Tap { at_micros: at }, None, 44_100)
+            .unwrap();
+    }
+    assert_eq!(tapped.bpm, Some(120.0));
+    let refused = Beatgrid {
+        bpm: None,
+        ..current
+    };
+    assert!(
+        s.lib
+            .edit_grid_in_memory(-3, refused, GridEdit::Halve, None, 44_100)
+            .is_err()
+    );
+    let reader = s.lib.reader().unwrap();
+    let rows: i64 = reader
+        .connection()
+        .query_row("SELECT count(*) FROM analysis", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}

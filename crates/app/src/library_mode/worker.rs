@@ -13,16 +13,18 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use engine::{DeckId, Hotcue, TrackBuffer, TrackMemory};
+use interop::guest::GuestTrack;
 use library::{
     Beatgrid, Browser, BrowserEdit, BrowserRequest, BrowserView, Drive, GridEdit, Library,
     PendingTrack, Reader, TrackRow, WriteOp, guest_markers,
 };
 
 use super::delete::{self, Deleter, Trash};
+use super::guest_decks;
 use super::memory_sync::engine_grid;
 use super::stick_watch::{CHECK_EVERY, StickWatcher};
 use crate::format::safe;
-use crate::guest::GuestSticks;
+use crate::guest::{GuestSticks, HotcueMarks};
 use crate::sticks::{Mounts, library_volumes, volume};
 
 /// The event when a playlist edit finds the entries it names moved since the window saw
@@ -90,6 +92,16 @@ pub enum Job {
         /// The decoded track's sample rate, for beat periods.
         sample_rate: Option<u32>,
     },
+    /// A grid edit on a guest track, applied to `current` (the grid its deck has) in
+    /// memory: the library reads and writes nothing. Answered as [`Job::Grid`] is.
+    GuestGrid {
+        deck: DeckId,
+        track: i64,
+        current: Beatgrid,
+        edit: GridEdit,
+        playhead: f64,
+        sample_rate: u32,
+    },
 }
 
 /// The files on the decks as the control loop knows them, for a delete to leave alone.
@@ -148,6 +160,17 @@ pub struct Loaded {
     pub hotcues_read: bool,
     /// The load is dropped if the deck plays when it arrives (the window's loads).
     pub refuse_if_playing: bool,
+    /// A guest track's: its hotcue colours and names, and how many of its stick's cues are
+    /// past the end of the file. Nothing of it is saved to the library.
+    pub guest: Option<GuestLoaded>,
+}
+
+/// What a guest track's load carries besides its memory.
+#[derive(Debug)]
+pub struct GuestLoaded {
+    pub marks: HotcueMarks,
+    /// The stick's cues dropped for being outside the decoded file.
+    pub dropped: usize,
 }
 
 struct LoadJob {
@@ -156,6 +179,8 @@ struct LoadJob {
     refuse_if_playing: bool,
     row: TrackRow,
     path: PathBuf,
+    /// A guest track's cues and grid, as its app keeps them.
+    guest: Option<GuestTrack>,
 }
 
 /// Starts the worker (and its loader), browsing `drives`, or the computer's drives when
@@ -284,16 +309,17 @@ fn run(
     let loader_events = events.clone();
     let in_flight = InFlight::default();
     let loader_flight = Arc::clone(&in_flight);
+    let loader_sticks = Arc::clone(&sticks);
     let loader = std::thread::Builder::new()
         .name("track-loader".into())
         .spawn(move || {
-            load_tracks(
-                &loader_reader,
-                &load_rx,
-                &loader_events,
+            let loading = Loading {
+                reader: &loader_reader,
+                sticks: &loader_sticks,
+                events: &loader_events,
                 decode,
-                &loader_flight,
-            );
+            };
+            load_tracks(&loading, &load_rx, &loader_flight);
         });
     if let Err(e) = &loader {
         say(format!("error: cannot start the track loader: {e}"));
@@ -459,7 +485,11 @@ fn run(
                         )),
                     }
                 }
-                for (deck, id) in decks {
+                // A guest track is not in the library.
+                for (deck, id) in decks
+                    .into_iter()
+                    .filter(|&(_, id)| !GuestSticks::is_guest(id))
+                {
                     if let (Ok(Some(details)), Ok(grid)) = (reader.track(id), reader.beatgrid(id)) {
                         let _ = events.send(Event::Track {
                             deck,
@@ -472,7 +502,7 @@ fn run(
             Job::LoadSelected { deck, seq } => match browser.selected_track() {
                 Some(row) => {
                     let load = (deck, row.id, seq, false);
-                    request_load(&reader, &load_tx, &in_flight, load, &say);
+                    request_load(&reader, &sticks, &load_tx, &in_flight, load, &say);
                 }
                 None => say(format!(
                     "Deck {}: nothing selected in the browser",
@@ -486,7 +516,7 @@ fn run(
                 refuse_if_playing,
             } => {
                 let load = (deck, track, seq, refuse_if_playing);
-                request_load(&reader, &load_tx, &in_flight, load, &say);
+                request_load(&reader, &sticks, &load_tx, &in_flight, load, &say);
             }
             Job::AskDelete { seq, target, decks } => {
                 let loaded = loaded_files(&decks, &in_flight);
@@ -522,6 +552,28 @@ fn run(
                     say(message);
                 }
             }
+            // A guest track's grid is edited in memory ([`Job::GuestGrid`]), never here.
+            Job::Grid { deck, track, .. } if GuestSticks::is_guest(track) => say(format!(
+                "Deck {}: beatgrid not changed: track {track} is a guest track",
+                deck_number(deck)
+            )),
+            Job::GuestGrid {
+                deck,
+                track,
+                current,
+                edit,
+                playhead,
+                sample_rate,
+            } => match lib.edit_grid_in_memory(track, current, edit, Some(playhead), sample_rate) {
+                Ok(grid) => {
+                    let _ = events.send(Event::Grid { deck, track, grid });
+                }
+                Err(e) => say(format!(
+                    "Deck {}: beatgrid not changed: {}",
+                    deck_number(deck),
+                    safe(e)
+                )),
+            },
             Job::Grid {
                 deck,
                 track,
@@ -676,41 +728,49 @@ fn loaded_files(decks: &DeckFiles, in_flight: &InFlight) -> Vec<(DeckId, PathBuf
     loaded
 }
 
-/// Looks the track up and hands it to the loader, unless its file is missing.
-/// Asks the loader to decode `(deck, track, seq, refuse_if_playing)`'s track, noting it in
-/// `in_flight` until the control loop takes it.
+/// Looks the track up (a guest track in `sticks`, from its stick) and asks the loader to
+/// decode `(deck, track, seq, refuse_if_playing)`'s track, unless its file is missing,
+/// noting it in `in_flight` until the control loop takes it.
 fn request_load(
     reader: &Reader,
+    sticks: &GuestSticks,
     loader: &Sender<LoadJob>,
     in_flight: &InFlight,
     (deck, track, seq, refuse_if_playing): (DeckId, i64, u64, bool),
     say: &dyn Fn(String),
 ) {
     let n = deck_number(deck);
-    // Task 8 loads a guest track from its stick; until then a guest id has no file to give.
-    if GuestSticks::is_guest(track) {
-        return say(format!(
-            "Deck {n}: loading a guest track is not available yet"
-        ));
-    }
-    let details = match reader.track(track) {
-        Ok(Some(details)) => details,
-        Ok(None) => return say(format!("Deck {n}: there is no track {track}")),
-        Err(e) => return say(format!("Deck {n}: cannot load track {track}: {}", safe(e))),
+    let (row, path, guest) = if GuestSticks::is_guest(track) {
+        match sticks.track(track) {
+            Some(guest) => (guest.row, guest.path, Some(guest.track)),
+            None => {
+                return say(match sticks.gone_stick(track) {
+                    Some(name) => format!("Stick {} is no longer plugged in", safe(name)),
+                    None => format!("Deck {n}: there is no track {track}"),
+                });
+            }
+        }
+    } else {
+        match reader.track(track) {
+            Ok(Some(details)) => (details.row, details.path, None),
+            Ok(None) => return say(format!("Deck {n}: there is no track {track}")),
+            Err(e) => return say(format!("Deck {n}: cannot load track {track}: {}", safe(e))),
+        }
     };
-    if details.row.missing || !details.path.exists() {
-        let title = safe(details.row.title.as_deref().unwrap_or("(untitled)"));
+    if row.missing || !path.exists() {
+        let title = safe(row.title.as_deref().unwrap_or("(untitled)"));
         return say(format!(
             "Deck {n}: cannot load {title} — file is missing ({})",
-            safe(details.path.display())
+            safe(path.display())
         ));
     }
     let job = LoadJob {
         deck,
         seq,
         refuse_if_playing,
-        row: details.row,
-        path: details.path,
+        row,
+        path,
+        guest,
     };
     in_flight.lock().unwrap_or_else(PoisonError::into_inner)[deck.index()] =
         Some((seq, job.path.clone()));
@@ -774,15 +834,17 @@ fn read_memory(
     (memory, hotcues.is_some())
 }
 
+/// What the loader works with.
+struct Loading<'a> {
+    reader: &'a Reader,
+    sticks: &'a GuestSticks,
+    events: &'a Sender<Event>,
+    decode: DecodeFn,
+}
+
 /// Decodes queued tracks; of several queued for one deck only the latest is decoded. A
 /// load that fails is taken out of `in_flight`.
-fn load_tracks(
-    reader: &Reader,
-    jobs: &Receiver<LoadJob>,
-    events: &Sender<Event>,
-    decode: DecodeFn,
-    in_flight: &InFlight,
-) {
+fn load_tracks(loading: &Loading<'_>, jobs: &Receiver<LoadJob>, in_flight: &InFlight) {
     while let Ok(first) = jobs.recv() {
         let mut latest: HashMap<usize, LoadJob> = HashMap::new();
         for job in std::iter::once(first).chain(jobs.try_iter()) {
@@ -792,7 +854,7 @@ fn load_tracks(
         batch.sort_by_key(|j| j.deck.index());
         for job in batch {
             let (deck, seq) = (job.deck.index(), job.seq);
-            if !load_one(reader, job, events, decode) {
+            if !load_one(loading, job) {
                 let mut flying = in_flight.lock().unwrap_or_else(PoisonError::into_inner);
                 if flying[deck].as_ref().is_some_and(|(s, _)| *s == seq) {
                     flying[deck] = None;
@@ -805,7 +867,13 @@ fn load_tracks(
 /// Decodes one track, then reads its memory (so a change saved during the decode is
 /// loaded). A decoder panic (say, on a malformed file) fails this load only: it is
 /// reported and the loader goes on. Returns whether the track was decoded.
-fn load_one(reader: &Reader, job: LoadJob, events: &Sender<Event>, decode: DecodeFn) -> bool {
+fn load_one(loading: &Loading<'_>, job: LoadJob) -> bool {
+    let Loading {
+        reader,
+        sticks,
+        events,
+        decode,
+    } = *loading;
     let n = deck_number(job.deck);
     let result = catch_unwind(AssertUnwindSafe(|| decode(&job.path)))
         .map_err(|_| "the decoder crashed on this file".to_owned())
@@ -818,8 +886,18 @@ fn load_one(reader: &Reader, job: LoadJob, events: &Sender<Event>, decode: Decod
                     safe(job.path.display())
                 )));
             }
-            let (memory, hotcues_read) =
-                read_memory(reader, job.row.id, decoded.track.sample_rate(), events);
+            let (memory, hotcues_read, guest) = match &job.guest {
+                Some(track) => {
+                    let (memory, guest) =
+                        guest_load(reader, sticks, job.row.id, track, &decoded.track);
+                    (memory, true, Some(guest))
+                }
+                None => {
+                    let (memory, read) =
+                        read_memory(reader, job.row.id, decoded.track.sample_rate(), events);
+                    (memory, read, None)
+                }
+            };
             let _ = events.send(Event::Loaded(Box::new(Loaded {
                 deck: job.deck,
                 seq: job.seq,
@@ -829,6 +907,7 @@ fn load_one(reader: &Reader, job: LoadJob, events: &Sender<Event>, decode: Decod
                 memory,
                 hotcues_read,
                 refuse_if_playing: job.refuse_if_playing,
+                guest,
             })));
             true
         }
@@ -841,6 +920,34 @@ fn load_one(reader: &Reader, job: LoadJob, events: &Sender<Event>, decode: Decod
             false
         }
     }
+}
+
+/// Guest track `id`'s memory once `buffer` is decoded: the session's edits if any, else its
+/// stick's cues and grid at the decoded rate. With no grid either way, one is detected from
+/// `buffer` (here, on the loader thread), for the deck only. Reads the library's BPM range
+/// setting and nothing else of it.
+fn guest_load(
+    reader: &Reader,
+    sticks: &GuestSticks,
+    id: i64,
+    track: &GuestTrack,
+    buffer: &TrackBuffer,
+) -> (TrackMemory, GuestLoaded) {
+    let (own, dropped) = guest_decks::guest_memory(track, buffer.sample_rate(), buffer.frames());
+    let mut memory = sticks.hotcues(id).unwrap_or(own);
+    let marks = sticks
+        .marks(id)
+        .unwrap_or_else(|| guest_decks::guest_marks(track, &own));
+    if memory.grid.is_none() {
+        let range = reader
+            .setting(library::BPM_RANGE)
+            .ok()
+            .flatten()
+            .and_then(|text| library::parse_bpm_range(&text).ok())
+            .unwrap_or_default();
+        memory.grid = guest_decks::detected_grid(buffer, range);
+    }
+    (memory, GuestLoaded { marks, dropped })
 }
 
 #[cfg(test)]
@@ -1121,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_guest_row_says_it_cannot_yet() {
+    fn a_guest_row_is_loaded_from_its_stick() {
         let sticks = Arc::new(GuestSticks::default());
         let (_dir, root, jobs, rx) = guest_worker(&sticks);
         let stick = serato_stick(&root);
@@ -1134,8 +1241,22 @@ mod tests {
             refuse_if_playing: false,
         })
         .unwrap();
+        // The stick has no such file.
         let said = wait_for(&rx, message);
-        assert_eq!(said, "Deck 1: loading a guest track is not available yet");
+        let file = safe(root.join("a.mp3").display());
+        assert_eq!(
+            said,
+            format!("Deck 1: cannot load a.mp3 — file is missing ({file})")
+        );
+        // An id no stick ever had.
+        jobs.send(Job::LoadTrack {
+            deck: deck(1),
+            track: -99,
+            seq: 2,
+            refuse_if_playing: false,
+        })
+        .unwrap();
+        assert_eq!(wait_for(&rx, message), "Deck 1: there is no track -99");
     }
 
     fn message(event: Event) -> Option<String> {
