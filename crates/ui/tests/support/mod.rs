@@ -248,6 +248,28 @@ fn browser() -> BrowserView {
     }
 }
 
+/// The browser of `frame` on a guest stick: the stick's node in place of its drive, open
+/// on two branches, with Serato's "Friday set" list shown (the list is the loaded
+/// browser's own rows).
+pub fn show_guest_stick(frame: &mut ControlFrame) {
+    let browser = frame
+        .browser
+        .as_mut()
+        .expect("a loaded frame has a browser");
+    browser.tree = vec![
+        tree_row("Macintosh HD", 0, TreeKind::Drive, false),
+        tree_row("OJGUEST", 0, TreeKind::GuestStick, true),
+        tree_row("Serato", 1, TreeKind::GuestBranch, true),
+        tree_row("Friday set", 2, TreeKind::GuestList, false),
+        tree_row("Warm up", 2, TreeKind::GuestList, false),
+        tree_row("VirtualDJ", 1, TreeKind::GuestBranch, false),
+        tree_row("Playlists", 0, TreeKind::Playlists, false),
+    ];
+    browser.tree_cursor = 3;
+    browser.path = "OJGUEST ▸ Serato ▸ Friday set".into();
+    browser.playlist = None;
+}
+
 /// Two decks (four with `four_decks`) loaded and playing at 126 BPM, with a key, a grid
 /// (so the beat counter shows), hotcues 1 to 3 and both waveforms; no covers. The browser
 /// shows a playlist with deck 1's track in it.

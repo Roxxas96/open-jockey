@@ -243,6 +243,14 @@ and nothing is deleted.
   the left of its row. "•" marks a track with saved cues, and "missing" a file that is gone.
   An info panel shows the selected track. The own files of a folder that was never scanned
   are added and analysed in the background, so BPM and key fill in as they finish.
+  A guest stick (one exported by Serato, rekordbox or VirtualDJ) shows as one node in place
+  of its drive's plain row, named after the stick. Below it is one branch per app on the
+  stick ("Serato", "rekordbox", "rekordbox (xml)", "VirtualDJ"), each with its playlists or
+  crates, and a "Files" child for the stick's own folders. A source the app cannot read
+  shows why as a note after the branch's name. The stick's rows have no Rename or Delete, and
+  its tracks cannot be dropped onto your playlists; see
+  [Guest sticks](interop.md#guest-sticks). Its cover menu items (Find a cover, Remove cover)
+  are greyed out.
 - **Panels:** the dividers, the info panel and the sideview are described in
   [Dividers, folding and the sideview](#dividers-folding-and-the-sideview).
 

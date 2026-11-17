@@ -34,6 +34,9 @@ start (the 10 newest backups are kept):
   hotcues and saved loops (`library export`, or Settings, USB export in the window); your
   music files are never changed. See [docs/interop.md](docs/interop.md): the stick formats
   were checked by hand in all three apps on macOS. Still unchecked: a CDJ, Windows or another computer, and Serato DJ Pro's saved loops.
+- Guest sticks: a stick exported by Serato, rekordbox or VirtualDJ shows in the browser and its
+  tracks play with that app's cues; nothing on the stick is changed and nothing reaches your
+  library. See [docs/interop.md](docs/interop.md#guest-sticks).
 
 ## Stems
 

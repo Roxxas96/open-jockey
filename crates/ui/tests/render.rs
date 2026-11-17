@@ -127,3 +127,13 @@ fn render_a_held_roll() {
     deck.roll_span = Some((start, start + 4.0 * period));
     render_with("pro-roll", frame, reads, WINDOW);
 }
+
+/// The Pro layout with a guest stick in the tree, two apps' branches below it, and one of
+/// its lists open.
+#[test]
+#[ignore = "needs a GPU; writes target/ui-render/*.png"]
+fn render_a_guest_stick() {
+    let (mut frame, reads) = support::loaded(Layout::Pro, false);
+    support::show_guest_stick(&mut frame);
+    render_with("pro-guest", frame, reads, WINDOW);
+}
