@@ -39,7 +39,8 @@ fn browser(count: usize, seconds: Option<f64>) -> BrowserView {
 
 #[test]
 fn the_footer_reads_a_guest_list_like_a_playlist() {
-    let mut view = browser(12, Some(3_600.0));
+    // Guest rows have no length, so the browser gives a guest list a total of 0 s.
+    let mut view = browser(12, Some(0.0));
     view.path = "OJGUEST ▸ Serato ▸ OJ Serato A".into();
     // The browser holds no playlist for a guest list; its tree row says what it is.
     view.playlist = None;
@@ -56,7 +57,8 @@ fn the_footer_reads_a_guest_list_like_a_playlist() {
         browser: Some(view),
         ..ControlFrame::default()
     });
-    h.get_by_label("OJ Serato A · 12 tracks · 1 h");
+    // The count only, as for a playlist whose tracks have no length yet.
+    h.get_by_label("OJ Serato A · 12 tracks");
 }
 
 fn job(kind: JobKind, label: &str) -> JobView {

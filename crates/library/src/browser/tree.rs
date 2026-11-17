@@ -435,9 +435,12 @@ fn guest_rows(rows: &mut Vec<Node>, old: &[Node], drive: &Drive, stick: usize, g
     }
 }
 
-/// Whether the guest stick mounted at `a` is on the drive at `b`.
+/// Whether the guest stick mounted at `a` is on the drive at `b`. Compared as paths, with no
+/// disk read (a mount that stopped answering must not stall a rebuild): the stick's root is
+/// canonical from the mount scan, and a drive's path is its mount dir's entry, which is the
+/// same path for a mounted volume.
 fn same_root(a: &Path, b: &Path) -> bool {
-    a == b || matches!((dunce::canonicalize(a), dunce::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+    a == b
 }
 
 fn row(label: String, depth: u8, kind: TreeKind) -> TreeRow {
@@ -478,4 +481,26 @@ fn subfolders(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
     }
     folders.sort_by_cached_key(|(name, _)| name.to_lowercase());
     Ok(folders)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A guest stick is matched to its drive row without touching the disk (a mount that
+    /// stopped answering must not stall a rebuild): the paths are compared as they are, and
+    /// both come canonical from where they were listed.
+    #[cfg(unix)]
+    #[test]
+    fn a_stick_matches_its_drive_by_path_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dunce::canonicalize(dir.path()).unwrap().join("STICK");
+        fs::create_dir(&real).unwrap();
+        let link = real.with_file_name("LINK");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(same_root(&real, &real));
+        // Resolving the link would make them one; only a disk read could tell.
+        assert!(!same_root(&real, &link));
+        assert!(!same_root(Path::new("/Volumes/A"), Path::new("/Volumes/B")));
+    }
 }

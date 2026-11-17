@@ -25,6 +25,17 @@ fn app_label(app: GuestApp) -> &'static str {
     }
 }
 
+/// The name of the list each app branch starts with: every track the app knows, so a track in
+/// no playlist or crate still loads.
+pub const ALL_TRACKS: &str = "All tracks";
+
+/// `bpm` when a grid can be built from it ([`library::MIN_GRID_BPM`] to
+/// [`library::MAX_GRID_BPM`]); a crafted or damaged value, or one no grid can be set to, is
+/// none.
+pub fn plausible_bpm(bpm: Option<f64>) -> Option<f64> {
+    bpm.filter(|b| (library::MIN_GRID_BPM..=library::MAX_GRID_BPM).contains(b))
+}
+
 /// A track's hotcue colours and names, slot by slot.
 pub type HotcueMarks = [Option<HotcueMark>; HOTCUES];
 
@@ -99,9 +110,9 @@ impl GuestSticks {
         self.lock().sticks.clone()
     }
 
-    /// The sticks as the browser lists them: each app's branch with its lists, the names
-    /// cleaned of control characters. Reads the rows one list at a time, so no lock is held
-    /// long.
+    /// The sticks as the browser lists them: each app's branch with its lists ("All tracks"
+    /// first, then the app's own), the names cleaned of control characters. Reads the rows
+    /// one list at a time, so no lock is held long.
     pub fn nodes(&self) -> Vec<GuestNode> {
         let sticks = self.sticks();
         sticks
@@ -115,14 +126,15 @@ impl GuestSticks {
                     .map(|source| GuestBranch {
                         label: app_label(source.app).to_owned(),
                         note: source.problem.as_ref().map(safe),
-                        lists: source
-                            .playlists
-                            .iter()
-                            .map(|(name, ids)| GuestList {
-                                name: safe(name),
-                                rows: self.rows(ids),
-                            })
-                            .collect(),
+                        lists: std::iter::once(GuestList {
+                            name: ALL_TRACKS.to_owned(),
+                            rows: self.rows(&source.tracks),
+                        })
+                        .chain(source.playlists.iter().map(|(name, ids)| GuestList {
+                            name: safe(name),
+                            rows: self.rows(ids),
+                        }))
+                        .collect(),
                     })
                     .collect(),
             })
@@ -224,7 +236,7 @@ impl GuestSticks {
                         id,
                         title: track.title.clone(),
                         artist: track.artist.clone(),
-                        bpm: track.bpm,
+                        bpm: plausible_bpm(track.bpm),
                         key: None,
                         duration_frames: None,
                         sample_rate: None,
@@ -387,6 +399,23 @@ mod tests {
         assert!(second.iter().all(|id| !first.contains(id) && *id < 0));
         // A session edit died with the stick.
         assert!(store.lock().hotcues.is_empty());
+    }
+
+    #[test]
+    fn each_branch_lists_all_its_tracks_first() {
+        let store = GuestSticks::default();
+        let mut src = source(GuestApp::VirtualDj, &["/mnt/S/a", "/mnt/S/b", "/mnt/S/c"]);
+        // The playlist holds one track; the other two are in no list.
+        src.playlists[0].tracks = vec![1];
+        plug(&store, &stick("/mnt/S", vec![src]));
+        let ids = store.sticks()[0].sources[0].tracks.clone();
+        let nodes = store.nodes();
+        let lists = &nodes[0].branches[0].lists;
+        let names: Vec<&str> = lists.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["All tracks", "P"]);
+        let all: Vec<i64> = lists[0].rows.iter().map(|(_, row)| row.id).collect();
+        assert_eq!(all, ids);
+        assert_eq!(lists[1].rows.len(), 1);
     }
 
     #[test]

@@ -410,7 +410,8 @@ const STOPPED: &str = "The export stopped unexpectedly.";
 fn listed(lib: &Library, mounts: &Mounts) -> Result<Listed, String> {
     let fail = |e: anyhow::Error| safe(format!("{e:#}"));
     let reader = lib.reader().map_err(|e| fail(e.into()))?;
-    let sticks = list_sticks(&reader, mounts).map_err(fail)?;
+    let mut sticks = list_sticks(&reader, mounts).map_err(fail)?;
+    sticks.retain(|stick| !is_guest_stick(&stick.root));
     let playlists = reader.playlists().map_err(|e| fail(e.into()))?;
     let labels = sticks
         .iter()
@@ -443,6 +444,13 @@ fn listed(lib: &Library, mounts: &Mounts) -> Result<Listed, String> {
             .collect(),
     };
     Ok(Listed { sticks, choice })
+}
+
+/// Whether the volume at `root` is a guest stick, which an export never writes to: it carries
+/// another app's marker and no Open Jockey manifest. A stick Open Jockey exported to before has
+/// the markers too, and its manifest (even a damaged one) keeps it a target.
+fn is_guest_stick(root: &std::path::Path) -> bool {
+    library::guest_markers(root).any() && matches!(Manifest::read(root), Ok(None))
 }
 
 /// Plans exporting `playlists` from `lib` to `stick`; writes nothing.
@@ -846,6 +854,38 @@ mod tests {
             panic!("no choice: {:?}", s.view());
         };
         assert_eq!(choice.sticks[0].exported, [s.mix]);
+    }
+
+    #[test]
+    fn a_guest_stick_is_never_offered() {
+        let mut s = setup();
+        let volumes = s.stick.parent().unwrap().to_path_buf();
+        // A friend's Serato stick, and the owner's own stick from an earlier export (it has
+        // the same markers, and Open Jockey's manifest).
+        std::fs::create_dir_all(volumes.join("FRIEND").join("_Serato_")).unwrap();
+        let own = volumes.join("OWN");
+        std::fs::create_dir_all(own.join("VirtualDJ")).unwrap();
+        std::fs::create_dir_all(own.join("Open Jockey")).unwrap();
+        std::fs::write(
+            own.join("Open Jockey").join("export.toml"),
+            "version = 1\nplaylists = []\ncrates = []\nvdj_lists = []\ntracks = []\n",
+        )
+        .unwrap();
+        s.send(ExportStep::Open);
+        let ExportView::Choose(choice) = s.settled() else {
+            panic!("no choice: {:?}", s.view());
+        };
+        let names: Vec<&str> = choice.sticks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["OWN", "STICK"]);
+        assert!(
+            volumes
+                .join("FRIEND")
+                .join("_Serato_")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

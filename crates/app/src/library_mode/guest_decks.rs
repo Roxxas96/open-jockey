@@ -11,7 +11,7 @@ use ui::HotcueMark;
 
 use super::memory_sync::MemoryAction;
 use crate::format::safe;
-use crate::guest::HotcueMarks;
+use crate::guest::{HotcueMarks, plausible_bpm};
 
 /// What a deck holding a guest track keeps of it.
 #[derive(Debug, Clone)]
@@ -28,7 +28,8 @@ pub(super) struct GuestDeck {
 /// The memory of `track` decoded at `sample_rate` to `length_frames` frames: positions are
 /// `seconds × sample_rate`. A cue before 0 or at or past the end is dropped, and so is a
 /// saved loop that runs past the end; the count of dropped cues comes with it. The grid
-/// comes from the track's BPM and first beat (0 when the app gives none).
+/// comes from the track's BPM and first beat, only when it has both and the BPM is one a grid
+/// can be set to; otherwise there is none, and the loader detects one (Ruling R18).
 pub(super) fn guest_memory(
     track: &GuestTrack,
     sample_rate: u32,
@@ -72,10 +73,9 @@ pub(super) fn guest_memory(
             loop_frames,
         });
     }
-    memory.grid = track.bpm.and_then(|bpm| {
-        let first = track.first_beat.unwrap_or(0.0) * rate;
-        Grid::from_bpm(bpm, first, sample_rate)
-    });
+    memory.grid = plausible_bpm(track.bpm)
+        .zip(track.first_beat)
+        .and_then(|(bpm, first)| Grid::from_bpm(bpm, first * rate, sample_rate));
     (memory, dropped)
 }
 
@@ -200,9 +200,8 @@ mod tests {
         let eight_beats = 8.0 * 60.0 / 126.0 * r;
         assert!((at(3).loop_frames.unwrap() - eight_beats).abs() < 0.001 * r);
         assert!(memory.hotcues[4..].iter().all(Option::is_none));
-        // The grid is the app's: 126 BPM, at the decoded rate.
-        let grid = memory.grid.unwrap();
-        assert!((grid.beat_period_frames - 60.0 * r / 126.0).abs() < 0.5);
+        // VirtualDJ gives a BPM but no first beat: no grid here, so the loader detects one.
+        assert_eq!(memory.grid, None);
     }
 
     #[test]
@@ -251,6 +250,34 @@ mod tests {
         assert_eq!(memory.grid, None);
     }
 
+    #[test]
+    fn a_guest_grid_needs_a_plausible_bpm_and_a_first_beat() {
+        let with = |bpm: f64, first_beat: Option<f64>| GuestTrack {
+            path: PathBuf::from("/s/a.wav"),
+            title: Some("A".into()),
+            artist: None,
+            album: None,
+            bpm: Some(bpm),
+            first_beat,
+            main_cue: None,
+            hotcues: Vec::new(),
+        };
+        let grid = |track: &GuestTrack| guest_memory(track, 1000, 10_000).0.grid;
+        // A crafted or damaged BPM, or one outside what a grid can be set to: no grid, so
+        // the loader detects one.
+        for bpm in [1e9, f64::INFINITY, f64::NAN, 0.0, -120.0, 39.0, 301.0] {
+            assert_eq!(grid(&with(bpm, Some(0.5))), None, "bpm {bpm}");
+        }
+        // A BPM with no first beat (VirtualDJ), or a first beat that is no number: no grid.
+        assert_eq!(grid(&with(126.0, None)), None);
+        assert_eq!(grid(&with(126.0, Some(f64::NAN))), None);
+        // In range with a first beat: the app's grid, at the decoded rate.
+        let kept = grid(&with(126.0, Some(0.5))).expect("a grid");
+        assert!((kept.beat_period_frames - 60.0 * 1000.0 / 126.0).abs() < 1e-6);
+        assert!(grid(&with(40.0, Some(0.0))).is_some());
+        assert!(grid(&with(300.0, Some(0.0))).is_some());
+    }
+
     type Events = Arc<Mutex<Vec<String>>>;
 
     struct Rig {
@@ -297,12 +324,13 @@ mod tests {
 
     /// The id of the plugged-in VirtualDJ track titled `title`.
     fn vdj_id(sticks: &GuestSticks, title: &str) -> i64 {
+        app_id(sticks, GuestApp::VirtualDj, title)
+    }
+
+    /// The id of the plugged-in track titled `title` of `app`'s branch.
+    fn app_id(sticks: &GuestSticks, app: GuestApp, title: &str) -> i64 {
         let all = sticks.sticks();
-        let source = all[0]
-            .sources
-            .iter()
-            .find(|s| s.app == GuestApp::VirtualDj)
-            .unwrap();
+        let source = all[0].sources.iter().find(|s| s.app == app).unwrap();
         *source
             .tracks
             .iter()
@@ -420,12 +448,23 @@ mod tests {
         wait_event(&mut rig, |e| {
             e == "Deck 1: 4 cues of OJ Click 126 are past the end of the file"
         });
-        // The app's grid, at the decoded rate.
-        let rate = f64::from(rig.engine.deck(deck(0)).track_sample_rate);
-        let grid = rig.engine.deck(deck(0)).grid.unwrap();
-        assert!((grid.beat_period_frames - 60.0 * rate / 126.0).abs() < 0.5);
         assert_library_untouched(&rig.mode);
         no_warnings(&rig.events);
+    }
+
+    #[test]
+    fn a_serato_guest_track_loads_with_its_tempo_map_grid() {
+        let mut rig = rig(None);
+        let id = app_id(&rig.mode.sticks, GuestApp::Serato, "OJ Click 126");
+        load(&mut rig, 0, id);
+        // The app's grid, at the decoded rate: the tempo map's BPM and first beat.
+        let track = rig.mode.sticks.track(id).unwrap().track;
+        let rate = f64::from(rig.engine.deck(deck(0)).track_sample_rate);
+        let grid = rig.engine.deck(deck(0)).grid.unwrap();
+        assert!((grid.beat_period_frames - 60.0 * rate / 126.000_728).abs() < 0.01);
+        let first = track.first_beat.unwrap() * rate;
+        assert!((grid.first_beat_frames - first).abs() < 0.01);
+        assert_library_untouched(&rig.mode);
     }
 
     #[test]
@@ -511,7 +550,8 @@ mod tests {
         let mut rig = rig(Some(stems));
         flush(&rig.mode);
         let before = table_rows(&rig.mode.lib);
-        let id = vdj_id(&rig.mode.sticks, "OJ Click 120");
+        // Serato's 120 has a grid (its tempo map) to shift.
+        let id = app_id(&rig.mode.sticks, GuestApp::Serato, "OJ Click 120");
         load(&mut rig, 0, id);
         // Cue point, a hotcue and its label.
         let slot2 = HotcueSlot::new(2).unwrap();
@@ -726,18 +766,34 @@ mod tests {
         }
     }
 
+    /// Loads Serato's 120 (its tempo map's grid: 0.4994 s at 119.996 BPM) on deck 1, and
+    /// gives its id and grid.
+    fn load_serato_120(rig: &mut Rig) -> (i64, engine::Grid) {
+        let id = app_id(&rig.mode.sticks, GuestApp::Serato, "OJ Click 120");
+        load(rig, 0, id);
+        (
+            id,
+            rig.engine.deck(deck(0)).grid.expect("the tempo map's grid"),
+        )
+    }
+
     #[test]
     fn guest_grid_edits_in_a_row_all_apply_in_order() {
         let mut rig = rig(None);
-        let id = vdj_id(&rig.mode.sticks, "OJ Click 120");
-        load(&mut rig, 0, id);
+        let (id, start) = load_serato_120(&mut rig);
+        let (period, first) = (start.beat_period_frames, start.first_beat_frames);
         let shift = GridEditRequest::Shift { millis: 10 };
         // Two shifts: 20 ms.
-        edit_grid(&mut rig, &[shift, shift], |r| (60.0 * r / 120.0, 0.02 * r));
+        edit_grid(&mut rig, &[shift, shift], |r| {
+            (period, (first + 0.02 * r).rem_euclid(period))
+        });
         // Double then shift: the doubled grid, shifted.
         edit_grid(&mut rig, &[GridEditRequest::Double, shift], |r| {
-            let period = 60.0 * r / 240.0;
-            ((period), (0.03 * r).rem_euclid(period))
+            let half = period / 2.0;
+            (
+                half,
+                ((first + 0.02 * r).rem_euclid(period) + 0.01 * r).rem_euclid(half),
+            )
         });
         let kept = rig.mode.sticks.hotcues(id).unwrap().grid;
         assert_eq!(kept, rig.engine.deck(deck(0)).grid);
@@ -746,9 +802,9 @@ mod tests {
     #[test]
     fn a_guest_grid_edit_waits_for_room_in_a_full_engine_queue() {
         let mut rig = rig(None);
-        let id = vdj_id(&rig.mode.sticks, "OJ Click 120");
-        load(&mut rig, 0, id);
+        let (id, start) = load_serato_120(&mut rig);
         let rate = f64::from(rig.engine.deck(deck(0)).track_sample_rate);
+        let want = (start.first_beat_frames + 0.01 * rate).rem_euclid(start.beat_period_frames);
         while rig
             .engine
             .send(Command::Deck(deck(0), DeckCommand::Pause))
@@ -778,14 +834,14 @@ mod tests {
         // Kept for the session at once, and on the deck once there is room.
         let kept = rig.mode.sticks.hotcues(id).and_then(|m| m.grid);
         assert!(
-            kept.is_some_and(|g| (g.first_beat_frames - 0.01 * rate).abs() < 1.0),
+            kept.is_some_and(|g| (g.first_beat_frames - want).abs() < 1.0),
             "{kept:?}"
         );
         run_until(&mut rig, |_, engine| {
             engine
                 .deck(deck(0))
                 .grid
-                .is_some_and(|g| (g.first_beat_frames - 0.01 * rate).abs() < 1.0)
+                .is_some_and(|g| (g.first_beat_frames - want).abs() < 1.0)
         });
     }
 }

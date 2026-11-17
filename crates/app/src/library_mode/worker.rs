@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 use engine::{DeckId, Hotcue, TrackBuffer, TrackMemory};
 use interop::guest::GuestTrack;
@@ -22,7 +21,7 @@ use library::{
 use super::delete::{self, Deleter, Trash};
 use super::guest_decks;
 use super::memory_sync::engine_grid;
-use super::stick_watch::{CHECK_EVERY, StickWatcher};
+use super::stick_watch::{self, CHECK_EVERY, StickWatcher};
 use crate::format::safe;
 use crate::guest::{GuestSticks, HotcueMarks};
 use crate::sticks::{Mounts, library_volumes, volume};
@@ -211,6 +210,7 @@ pub fn spawn(
             Mounts::usual()
         },
         sticks,
+        scan: StickWatcher::scan,
     };
     spawn_watching(lib, events, decode::decode_file, roots, trash, watching)
 }
@@ -219,6 +219,8 @@ pub fn spawn(
 struct Watching {
     mounts: Mounts,
     sticks: Arc<GuestSticks>,
+    /// One look at the mounts ([`StickWatcher::scan`], or a stand-in in tests).
+    scan: fn(&mut StickWatcher),
 }
 
 /// [`spawn`] with the loader decoding through `decode` and the browser's tree starting
@@ -235,6 +237,7 @@ fn spawn_with(
     let watching = Watching {
         mounts: Mounts::default(),
         sticks: Arc::default(),
+        scan: StickWatcher::scan,
     };
     spawn_watching(lib, events, decode, roots, trash, watching)
 }
@@ -303,7 +306,10 @@ fn run(
     // What a delete never takes: Open Jockey's own folders.
     let own = delete::own_folders(lib.path());
     let adder = FolderAdder::start(lib, events, watching.mounts.clone());
-    let mut watcher = StickWatcher::start(lib, events, watching.mounts, watching.sticks);
+    // Looks at the mounts on its own thread; it stops when this is dropped, as the worker
+    // ends, and is never waited for.
+    let watcher = StickWatcher::start(lib, events, watching.mounts, watching.sticks);
+    let _watch = stick_watch::watch(watcher, watching.scan, events);
     adder.offer(&browser);
     let (load_tx, load_rx) = channel::<LoadJob>();
     let loader_events = events.clone();
@@ -325,18 +331,13 @@ fn run(
         say(format!("error: cannot start the track loader: {e}"));
     }
 
-    let mut last_scan: Option<Instant> = None;
     // Each guest track's grid as last edited in memory, by id (ids are never reused); a
     // removed stick's are forgotten.
     let mut guest_grids: HashMap<i64, Beatgrid> = HashMap::new();
     loop {
-        // Between jobs, the mounts are looked at every `CHECK_EVERY`.
-        if last_scan.is_none_or(|at| at.elapsed() >= CHECK_EVERY) {
-            last_scan = Some(Instant::now());
-            watcher.scan();
-        }
-        // A stick came or went (found by the reader thread, or just dropped by the scan):
-        // the browser shows the sticks as they are now.
+        // A stick came or went (found by the reader thread, or dropped by the watch): the
+        // browser shows the sticks as they are now. Looked at between jobs, at least every
+        // `CHECK_EVERY`.
         let generation = sticks.generation();
         if generation != guests_seen {
             guests_seen = generation;
@@ -1063,6 +1064,7 @@ mod tests {
         let watching = Watching {
             mounts,
             sticks: Arc::clone(&sticks),
+            scan: StickWatcher::scan,
         };
         let (_jobs, _worker) = spawn_watching(
             Arc::new(lib),
@@ -1075,6 +1077,58 @@ mod tests {
         .unwrap();
         wait_for(&rx, |e| message(e).filter(|m| m == "Stick STICK: Serato"));
         assert_eq!(sticks.sticks().len(), 1);
+    }
+
+    /// A look at the mounts that never returns, as on a mount that stopped answering.
+    fn hung_scan(_: &mut StickWatcher) {
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[test]
+    fn a_hung_mount_never_blocks_loading_browsing_or_shutdown() {
+        let s = setup(&["a.wav"]);
+        let id = ids(&s.lib)[0];
+        let (tx, events) = channel();
+        let watching = Watching {
+            mounts: Mounts::default(),
+            sticks: Arc::default(),
+            scan: hung_scan,
+        };
+        let (jobs, worker) = spawn_watching(
+            Arc::clone(&s.lib),
+            tx,
+            decode::decode_file,
+            Vec::new,
+            no_trash(),
+            watching,
+        )
+        .unwrap();
+        wait_for(&events, |e| matches!(e, Event::Browser(_)).then_some(()));
+        // Browsing.
+        jobs.send(Job::Edit(BrowserEdit::SelectTree(0))).unwrap();
+        wait_for(&events, |e| matches!(e, Event::Browser(_)).then_some(()));
+        // Loading.
+        jobs.send(Job::LoadTrack {
+            deck: deck(1),
+            track: id,
+            seq: 1,
+            refuse_if_playing: false,
+        })
+        .unwrap();
+        let loaded = wait_for(&events, |e| match e {
+            Event::Loaded(l) => Some(l),
+            _ => None,
+        });
+        assert_eq!(loaded.row.id, id);
+        // Shutdown: the worker ends without waiting for the scan.
+        drop(jobs);
+        let (done, ended) = channel();
+        std::thread::spawn(move || {
+            let _ = done.send(worker.join().is_ok());
+        });
+        assert_eq!(ended.recv_timeout(Duration::from_secs(10)), Ok(true));
     }
 
     #[test]
@@ -1158,6 +1212,7 @@ mod tests {
         let watching = Watching {
             mounts: Mounts::default(),
             sticks: Arc::clone(sticks),
+            scan: StickWatcher::scan,
         };
         let (jobs, _worker) = spawn_watching(
             Arc::new(lib),
@@ -1197,7 +1252,7 @@ mod tests {
             Event::Browser(v) if !labels_of(&v, kind).is_empty() => Some(v),
             _ => None,
         });
-        assert_eq!(labels_of(&view, kind), ["Crate"]);
+        assert_eq!(labels_of(&view, kind), ["All tracks", "Crate"]);
         assert_eq!(labels_of(&view, library::TreeKind::GuestBranch), ["Serato"]);
         assert_eq!(labels_of(&view, library::TreeKind::GuestStick), ["STICK"]);
         assert!(labels_of(&view, library::TreeKind::Drive).is_empty());
@@ -1208,6 +1263,43 @@ mod tests {
             _ => None,
         });
         assert_eq!(labels_of(&view, library::TreeKind::Drive), ["STICK"]);
+    }
+
+    #[test]
+    fn a_track_in_no_crate_loads_from_all_tracks() {
+        let sticks = Arc::new(GuestSticks::default());
+        let (_dir, root, jobs, rx) = guest_worker(&sticks);
+        let mut stick = serato_stick(&root);
+        // The crate holds only a.mp3: b.mp3 is in no crate.
+        stick.sources[0].playlists[0].tracks = vec![0];
+        plug_in(&sticks, &stick);
+        let kind = library::TreeKind::GuestList;
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) if !labels_of(&v, kind).is_empty() => Some(v),
+            _ => None,
+        });
+        assert_eq!(labels_of(&view, kind), ["All tracks", "Crate"]);
+        let at = view
+            .tree
+            .iter()
+            .position(|r| r.kind == kind && r.label == "All tracks")
+            .unwrap();
+        jobs.send(Job::Edit(BrowserEdit::SelectTree(at))).unwrap();
+        let view = wait_for(&rx, |e| match e {
+            Event::Browser(v) if v.list_count == 2 => Some(v),
+            _ => None,
+        });
+        assert_eq!(view.list_count, 2);
+        jobs.send(Job::Edit(BrowserEdit::SelectRow(1))).unwrap();
+        jobs.send(Job::LoadSelected {
+            deck: deck(1),
+            seq: 1,
+        })
+        .unwrap();
+        // b.mp3 is reached and loaded from the stick (which has no such file here).
+        let file = safe(root.join("b.mp3").display());
+        let want = format!("Deck 1: cannot load b.mp3 — file is missing ({file})");
+        wait_for(&rx, |e| message(e).filter(|m| *m == want));
     }
 
     #[test]

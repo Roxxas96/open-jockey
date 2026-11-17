@@ -1,13 +1,14 @@
-//! Finding guest sticks as they are plugged in and removed. The library-worker checks the
-//! mounts every [`CHECK_EVERY`] (a hung mount can delay that check on the worker, which
-//! lists only names); a new stick is read on a "guest-reader" thread, so reading a slow
-//! stick never stalls browsing or loading, and lands in the shared [`GuestSticks`].
+//! Finding guest sticks as they are plugged in and removed. A "stick-watch" thread looks at
+//! the mounts every [`CHECK_EVERY`]; a new stick is read on a "guest-reader" thread, and lands
+//! in the shared [`GuestSticks`], whose generation tells the library-worker the sticks
+//! changed. Neither thread is the worker's and neither is joined, so a slow stick or a mount
+//! that stopped answering delays only finding sticks, never browsing, loading or quitting.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
 use interop::guest::{GuestApp, GuestStick};
@@ -38,7 +39,8 @@ fn display_name(name: &str) -> String {
     }
 }
 
-/// Looks at the mounts for sticks that came or went. Lives on the library-worker thread.
+/// Looks at the mounts for sticks that came or went. Made on the library-worker, then moved
+/// to the "stick-watch" thread ([`watch`]), where every look happens.
 pub struct StickWatcher {
     store: Arc<GuestSticks>,
     mounts: Mounts,
@@ -140,6 +142,37 @@ impl StickWatcher {
             if reads.send((root.clone(), name.clone(), plug)).is_ok() {
                 self.known.insert(root, name);
             }
+        }
+    }
+}
+
+/// Moves `watcher` to a "stick-watch" thread that calls `scan` on it at once and then every
+/// [`CHECK_EVERY`], until the returned sender is dropped. The thread is never joined: a scan
+/// stuck on a hung mount holds only it. `None` (with a message) when it cannot start.
+pub fn watch(
+    mut watcher: StickWatcher,
+    scan: fn(&mut StickWatcher),
+    events: &Sender<Event>,
+) -> Option<Sender<()>> {
+    let (stop, stopped) = channel::<()>();
+    let started = std::thread::Builder::new()
+        .name("stick-watch".into())
+        .spawn(move || {
+            loop {
+                scan(&mut watcher);
+                match stopped.recv_timeout(CHECK_EVERY) {
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+    match started {
+        Ok(_) => Some(stop),
+        Err(e) => {
+            let _ = events.send(Event::Message(format!(
+                "error: cannot start the guest stick watch: {e}"
+            )));
+            None
         }
     }
 }
