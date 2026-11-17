@@ -2,7 +2,7 @@
 //! `PIONEER/USBANLZ` analysis files its tracks point to. `exportLibrary.db` (the newer
 //! encrypted library) and `exportExt.pdb` are never read.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use super::anlz::{AnlzData, read_anlz};
@@ -78,7 +78,8 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
             track.bpm = Some(f64::from(row.tempo) / 100.0);
         }
         match analysis(root, &row.analyze_path) {
-            Ok(Some(data)) => {
+            Ok(Some((data, ext_refused))) => {
+                counts.anlz_refused += usize::from(ext_refused);
                 if let Some((first_beat, bpm)) = data.grid {
                     track.first_beat = Some(first_beat);
                     track.bpm = Some(bpm);
@@ -94,6 +95,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
         source.tracks.push(track);
     }
     source.playlists = playlists(&library, &ids);
+    counts.truncated = library.truncated;
     source.problem = counts.problem();
     Some(source)
 }
@@ -104,6 +106,8 @@ struct Counts {
     tracks_refused: usize,
     anlz_refused: usize,
     anlz_unreadable: usize,
+    /// The pdb held more rows than are read.
+    truncated: bool,
 }
 
 impl Counts {
@@ -127,6 +131,9 @@ impl Counts {
                 self.anlz_unreadable
             ));
         }
+        if self.truncated {
+            out.push("export.pdb holds more rows than are read".into());
+        }
         (!out.is_empty()).then(|| out.join("; "))
     }
 }
@@ -137,15 +144,18 @@ enum Refused {
 }
 
 /// The analysis of a track from its `.DAT` path (and the `.EXT` beside it), if it has one.
-fn analysis(root: &Path, analyze_path: &str) -> Result<Option<AnlzData>, Refused> {
+fn analysis(root: &Path, analyze_path: &str) -> Result<Option<(AnlzData, bool)>, Refused> {
     if analyze_path.is_empty() {
         return Ok(None);
     }
     let dat = stick_path(root, analyze_path).ok_or(Refused::Outside)?;
     let dat = on_stick(root, &dat).ok_or(Refused::Outside)?;
-    let ext = on_stick(root, &dat.with_extension("EXT"));
+    // An `.EXT` that is there but not on the stick is refused, not silently left out.
+    let ext_path = dat.with_extension("EXT");
+    let ext = on_stick(root, &ext_path);
+    let ext_refused = ext.is_none() && ext_path.symlink_metadata().is_ok();
     read_anlz(&dat, ext.as_deref())
-        .map(Some)
+        .map(|data| Some((data, ext_refused)))
         .map_err(|_| Refused::Unreadable)
 }
 
@@ -170,41 +180,61 @@ fn stick_path(root: &Path, stored: &str) -> Option<PathBuf> {
     any.then_some(out)
 }
 
-/// The playlists of the tree, each named `Folder / Playlist`, with their tracks in order.
+/// The deepest folder nesting followed.
+const MAX_DEPTH: usize = 32;
+
+/// The playlists of the tree in tree order (each folder's children by `sort_order`, folders
+/// before what follows them), each named `Folder / Playlist`, with their tracks in order.
 fn playlists(library: &PdbLibrary, ids: &HashMap<u32, usize>) -> Vec<GuestPlaylist> {
-    let by_id: HashMap<u32, &NodeRow> = library.nodes.iter().map(|n| (n.id, n)).collect();
+    let known: HashSet<u32> = library.nodes.iter().map(|n| n.id).collect();
+    // Children by parent; a node whose parent is not in the tree hangs off the root (0).
+    let mut children: HashMap<u32, Vec<&NodeRow>> = HashMap::new();
+    for node in &library.nodes {
+        let parent = if known.contains(&node.parent) && node.parent != node.id {
+            node.parent
+        } else {
+            0
+        };
+        children.entry(parent).or_default().push(node);
+    }
+    for list in children.values_mut() {
+        list.sort_by_key(|n| (n.sort_order, n.id));
+    }
+    let mut entries: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    for &(list, index, track) in &library.entries {
+        entries.entry(list).or_default().push((index, track));
+    }
     let mut lists = Vec::new();
-    let mut playlist_nodes: Vec<&NodeRow> =
-        library.nodes.iter().filter(|n| n.is_playlist).collect();
-    playlist_nodes.sort_by_key(|n| n.sort_order);
-    for node in playlist_nodes {
-        // The folders above it, outermost first; a cycle in a damaged file stops at its depth.
-        let mut names = vec![node.name.as_str()];
-        let mut parent = node.parent;
-        for _ in 0..64 {
-            match by_id.get(&parent) {
-                Some(p) if parent != 0 => {
-                    names.push(p.name.as_str());
-                    parent = p.parent;
-                }
-                _ => break,
+    let mut visited = HashSet::new();
+    // Depth-first with an explicit stack: nodes still to visit, with the folder names above.
+    let mut stack: Vec<(&NodeRow, Vec<&str>)> = children
+        .get(&0)
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|&n| (n, Vec::new()))
+        .collect();
+    while let Some((node, above)) = stack.pop() {
+        if !visited.insert(node.id) {
+            continue;
+        }
+        let mut names = above;
+        names.push(node.name.as_str());
+        if node.is_playlist {
+            let mut rows = entries.remove(&node.id).unwrap_or_default();
+            rows.sort_by_key(|&(index, _)| index);
+            lists.push(GuestPlaylist {
+                name: names.join(" / "),
+                tracks: rows
+                    .into_iter()
+                    .filter_map(|(_, track)| ids.get(&track).copied())
+                    .collect(),
+            });
+        } else if names.len() < MAX_DEPTH {
+            for &child in children.get(&node.id).into_iter().flatten().rev() {
+                stack.push((child, names.clone()));
             }
         }
-        names.reverse();
-        let mut entries: Vec<(u32, u32)> = library
-            .entries
-            .iter()
-            .filter(|(list, _, _)| *list == node.id)
-            .map(|&(_, index, track)| (index, track))
-            .collect();
-        entries.sort_by_key(|&(index, _)| index);
-        lists.push(GuestPlaylist {
-            name: names.join(" / "),
-            tracks: entries
-                .into_iter()
-                .filter_map(|(_, track)| ids.get(&track).copied())
-                .collect(),
-        });
     }
     lists
 }
@@ -221,5 +251,38 @@ mod tests {
             Some(root.join("Contents").join("a.mp3"))
         );
         assert_eq!(stick_path(root, "/Contents/../x"), None);
+    }
+
+    fn node(id: u32, parent: u32, sort_order: u32, name: &str, is_playlist: bool) -> NodeRow {
+        NodeRow {
+            id,
+            parent,
+            sort_order,
+            name: name.into(),
+            is_playlist,
+        }
+    }
+
+    #[test]
+    fn device_playlists_follow_the_tree() {
+        // Folders A and B each hold x and y; the rows come in a scrambled order.
+        let library = PdbLibrary {
+            nodes: vec![
+                node(6, 2, 1, "y", true),
+                node(3, 1, 0, "x", true),
+                node(2, 0, 1, "B", false),
+                node(5, 2, 0, "x", true),
+                node(4, 1, 1, "y", true),
+                node(1, 0, 0, "A", false),
+            ],
+            entries: vec![(3, 0, 10), (3, 1, 11), (6, 0, 12)],
+            ..PdbLibrary::default()
+        };
+        let ids = HashMap::from([(10, 0), (11, 1), (12, 2)]);
+        let lists = playlists(&library, &ids);
+        let names: Vec<&str> = lists.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["A / x", "A / y", "B / x", "B / y"]);
+        assert_eq!(lists[0].tracks, [0, 1]);
+        assert_eq!(lists[3].tracks, [2]);
     }
 }

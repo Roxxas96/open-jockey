@@ -120,6 +120,16 @@ fn combine(dat: &[u8], ext: Option<&[u8]>) -> AnlzData {
     }
 }
 
+/// The four tag bytes at `at`.
+fn tag_at(b: &[u8], at: usize) -> Option<&[u8]> {
+    b.get(at..at.checked_add(4)?)
+}
+
+/// The big-endian word `off` bytes after `at`.
+fn be32_at(b: &[u8], at: usize, off: usize) -> Option<u32> {
+    be32(b, at.checked_add(off)?)
+}
+
 fn be16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(
         b.get(at..at.checked_add(2)?)?.try_into().ok()?,
@@ -142,9 +152,9 @@ fn parse(bytes: &[u8]) -> Parsed {
         return out;
     };
     while let (Some(tag), Some(head), Some(total)) = (
-        bytes.get(at..at + 4),
-        be32(bytes, at + 4),
-        be32(bytes, at + 8),
+        tag_at(bytes, at),
+        be32_at(bytes, at, 4),
+        be32_at(bytes, at, 8),
     ) {
         let (head, total) = (head as usize, total as usize);
         let Some(end) = at.checked_add(total).filter(|&e| e <= bytes.len()) else {
@@ -188,9 +198,9 @@ fn cue_list(section: &[u8], head: usize, extended: bool, out: &mut Vec<RawCue>) 
     let mut at = head;
     for _ in 0..count {
         let (Some(tag), Some(entry_head), Some(entry_len)) = (
-            section.get(at..at + 4),
-            be32(section, at + 4),
-            be32(section, at + 8),
+            tag_at(section, at),
+            be32_at(section, at, 4),
+            be32_at(section, at, 8),
         ) else {
             return;
         };
@@ -241,9 +251,9 @@ fn extended_cue(e: &[u8]) -> Option<RawCue> {
         .take_while(|&u| u != 0)
         .collect();
     let comment = String::from_utf16_lossy(&units);
-    let after = 44 + len;
+    let after = 44usize.checked_add(len)?;
     let code = *e.get(after)?;
-    let rgb = e.get(after + 1..after + 4)?;
+    let rgb = e.get(after.checked_add(1)?..after.checked_add(4)?)?;
     let color = palette(code).or_else(|| {
         (rgb != [0, 0, 0])
             .then(|| u32::from(rgb[0]) << 16 | u32::from(rgb[1]) << 8 | u32::from(rgb[2]))
@@ -258,7 +268,9 @@ fn extended_cue(e: &[u8]) -> Option<RawCue> {
     })
 }
 
-/// rekordbox's hot cue colour for a colour code (the colours the app shows).
+/// rekordbox's hot cue colour for a colour code (the colours the app shows). The table is the
+/// public colour list of the Deep Symmetry analysis of rekordbox exports,
+/// <https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html>.
 fn palette(code: u8) -> Option<u32> {
     const COLORS: [u32; 62] = [
         0x305aff, 0x5073ff, 0x508cff, 0x50a0ff, 0x50b4ff, 0x50b0f2, 0x50aee8, 0x45acdb, 0x00e0ff,

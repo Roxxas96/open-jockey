@@ -19,6 +19,8 @@ const PAGE_HEADER_BYTES: usize = 0x28;
 const GROUP_BYTES: usize = 36;
 /// How many tables the header may list.
 const MAX_TABLES: usize = 64;
+/// The most rows read from one file, so a crafted one cannot grow the library without bound.
+const MAX_ROWS: usize = 1_000_000;
 /// The smallest and largest page size accepted.
 const PAGE_SIZE_RANGE: std::ops::RangeInclusive<usize> = 512..=1 << 20;
 
@@ -60,6 +62,18 @@ pub(crate) struct PdbLibrary {
     pub nodes: Vec<NodeRow>,
     /// `(playlist id, entry index, track id)`.
     pub entries: Vec<(u32, u32, u32)>,
+    /// Whether the row cap stopped the read.
+    pub truncated: bool,
+}
+
+impl PdbLibrary {
+    fn row_count(&self) -> usize {
+        self.tracks.len()
+            + self.artists.len()
+            + self.albums.len()
+            + self.nodes.len()
+            + self.entries.len()
+    }
 }
 
 fn le16(b: &[u8], at: usize) -> Option<u16> {
@@ -84,9 +98,11 @@ pub(crate) fn read_pdb(bytes: &[u8]) -> Result<PdbLibrary, String> {
     if tables > MAX_TABLES {
         return Err(format!("{tables} tables"));
     }
-    // A chain cannot hold more pages than the file does.
+    // A chain cannot hold more pages than the file does, and no page is read twice.
     let max_pages = bytes.len() / page_size + 1;
     let mut library = PdbLibrary::default();
+    let mut visited = HashSet::new();
+    let mut kinds_read = HashSet::new();
     for t in 0..tables {
         let at = HEADER_BYTES + t * TABLE_BYTES;
         let (Some(kind), Some(first), Some(last)) =
@@ -94,18 +110,24 @@ pub(crate) fn read_pdb(bytes: &[u8]) -> Result<PdbLibrary, String> {
         else {
             return Err("the table list is cut short".into());
         };
-        if ![TRACKS, ARTISTS, ALBUMS, PLAYLIST_TREE, PLAYLIST_ENTRIES].contains(&kind) {
+        // Each kind of table is read once, even if the list repeats it.
+        if ![TRACKS, ARTISTS, ALBUMS, PLAYLIST_TREE, PLAYLIST_ENTRIES].contains(&kind)
+            || !kinds_read.insert(kind)
+        {
             continue;
         }
-        let mut visited = HashSet::new();
         let mut index = first;
         while visited.len() < max_pages && visited.insert(index) {
             let page = (index as usize)
                 .checked_mul(page_size)
                 .and_then(|start| bytes.get(start..start.checked_add(page_size)?))
                 .ok_or("a page lies beyond the end of the file")?;
+            // A page names its own index and table type; a chain that strays is cut.
+            if le32(page, 4) != Some(index) || le32(page, 8) != Some(kind) {
+                break;
+            }
             read_page(page, kind, &mut library);
-            if index == last {
+            if index == last || library.truncated {
                 break;
             }
             index = le32(page, 12).ok_or("a page is cut short")?;
@@ -131,6 +153,7 @@ fn read_page(page: &[u8], kind: u32, library: &mut PdbLibrary) {
     } else {
         usize::from(small)
     };
+    let mut seen = HashSet::new();
     for group in 0..rows.div_ceil(16) {
         let Some(end) = group
             .checked_add(1)
@@ -147,9 +170,17 @@ fn read_page(page: &[u8], kind: u32, library: &mut PdbLibrary) {
             if present & (1 << i) == 0 {
                 continue;
             }
+            if library.row_count() >= MAX_ROWS {
+                library.truncated = true;
+                return;
+            }
             let Some(offset) = le16(page, end - 4 - 2 * (i + 1)) else {
                 continue;
             };
+            // A row offset used twice on a page is one row.
+            if !seen.insert(offset) {
+                continue;
+            }
             let Some(start) = PAGE_HEADER_BYTES.checked_add(usize::from(offset)) else {
                 continue;
             };
@@ -198,10 +229,17 @@ fn add_row(row: &[u8], kind: u32, library: &mut PdbLibrary) {
             }
         }
         ALBUMS => {
-            let (Some(id), Some(&near)) = (le32(row, 12), row.get(0x15)) else {
+            // Like an artist: a byte offset at 0x15, or a 16-bit one at 0x16 when the subtype
+            // is 0x84.
+            let (Some(subtype), Some(id)) = (le16(row, 0), le32(row, 12)) else {
                 return;
             };
-            if let Some(name) = text(row, usize::from(near)) {
+            let at = if subtype == 0x84 {
+                le16(row, 0x16).map(usize::from)
+            } else {
+                row.get(0x15).map(|&b| usize::from(b))
+            };
+            if let Some(name) = at.and_then(|at| text(row, at)) {
                 library.albums.insert(id, name);
             }
         }
