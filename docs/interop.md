@@ -145,9 +145,9 @@ Jockey's manifest) is still offered.
 end of the file are dropped, with a message. Serato's grid comes from each file's `Serato
 Tempo Map` tag (or the older `Serato BeatGrid`). A track with no grid gets one detected in
 memory only, and so does a track whose app gives a BPM but no first beat (VirtualDJ) or a
-BPM outside 40 to 300. Cover
-lookup, cover removal and stems are not available for guest tracks. Guest rows show no length
-and no key (the stick gives none), so the list's footer shows its track count only.
+BPM outside 40 to 300. Cover lookup, cover removal and stems are not available for guest
+tracks. Guest rows show no length and no key (the stick gives none), so the list's footer
+shows its track count only.
 
 **Edits last for the session.** Hotcue, label and grid edits on a guest deck are kept in
 memory, so a reload shows them, but they are lost when the stick is unplugged.

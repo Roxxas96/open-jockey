@@ -24,9 +24,12 @@ Changes from the stick, so the repo carries no personal data and stays small:
   - grids, in each file's `Serato Tempo Map` tag (version 2; a big-endian `f64` beat position at byte 4
     and the BPM at byte 24, read off these files; the database's `tbpm` holds the rounded BPM):
     120.wav 0.499423 s at 119.995584 BPM, 126.mp3 0.531400 s at 126.000728 BPM, 128.mp3 0.523970 s at
-    127.998569 BPM. Positions are as Serato stores them: an MP3's still includes the Info-frame shift its
-    cues have. The WAV's audio clicks on each beat from 0 s, so 0.499423 s is its second beat, about
-    0.6 ms early (VirtualDJ's `Phase` puts the beat 0.5 ms early too).
+    127.998569 BPM. Positions are as Serato stores them: an MP3's still includes the shift its cues have.
+    Measured on both MP3s, Serato's timeline is 55.2 ms (2,435 frames) later than the gapless decode,
+    whose clicks fall on 0 s and every beat after; the LAME tag gives an encoder delay of 576 (with the
+    decoder's 529, a gapless trim of 1,105) and the Info frame is 1,152, so the known parts make 2,257
+    and leave about 4 ms unexplained. The WAV's audio clicks on each beat from 0 s, so 0.499423 s is its
+    second beat, about 0.6 ms early (VirtualDJ's `Phase` puts the beat 0.5 ms early too).
 - **rekordbox device library** (`PIONEER/rekordbox/export.pdb`, `PIONEER/USBANLZ`, files under `Contents/`):
   - playlist `OJ Rekordbox A` = 120, 128, 126 (the same as `rekordbox.xml`).
   - grids: 120.wav at **149.96 BPM** (rekordbox misread it; a real wrong grid), 126 at 126.00, 128 at 128.00.
