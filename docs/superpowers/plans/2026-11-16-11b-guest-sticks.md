@@ -331,7 +331,8 @@ impl Browser { pub fn set_guests(&mut self, guests: Vec<GuestNode>) }
 - Where the stick shows:
   - A guest stick shows **in place of** its plain `Drive` row, with the same name and its branches below. Its folders
     are still browsable under a "Files" child. Those files can't be loaded (they have no library track), and Task 1
-    stops them being added.
+    stops them being added. (Ruling R17, final review: so every track still loads, each app branch gets an
+    "All tracks" list first, built from the source's tracks.)
 - How guest lists behave:
   - A guest list uses search and sort like a playlist.
   - `BrowserView.playlist` stays `None` for a guest list, so playlist edits never target it.
@@ -366,7 +367,8 @@ impl Browser { pub fn set_guests(&mut self, guests: Vec<GuestNode>) }
     `frames = seconds × sample_rate`.
   - A position `< 0`, or at or past the decoded length, is dropped, and so is a loop that runs past the end. The
     message gives the count: "Deck N: 2 cues of {title} are past the end of the file".
-  - The grid comes from `bpm` and `first_beat`.
+  - The grid comes from `bpm` and `first_beat`. (Ruling R18, final review: only when both are there and the BPM is
+    within `MIN_GRID_BPM..=MAX_GRID_BPM`; otherwise the track counts as gridless and gets in-memory detection.)
   - With no grid, the loader runs `analysis` BPM detection on the decoded buffer, off the control thread, and sets
     the grid only in memory.
 - Saving:

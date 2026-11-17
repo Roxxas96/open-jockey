@@ -127,20 +127,25 @@ and a volume that holds one of your own library folders is never a guest stick. 
 when it is plugged in and goes when it is removed.
 
 **What shows.** The stick's node replaces the drive's plain row. It has one branch per app
-("Serato", "rekordbox", "rekordbox (xml)", "VirtualDJ"), each with its playlists or crates
-in the order that app has them (nested folders flatten to "Folder / Playlist"), and a
-"Files" child. A track that is in no playlist or crate is reached through "Files"; there is
-no "All tracks" list. A source the app cannot read shows its problem as the branch's note.
+("Serato", "rekordbox", "rekordbox (xml)", "VirtualDJ"), each with an "All tracks" list
+first (every track that app knows, in its order, so a track in no playlist or crate still
+loads), then its playlists or crates in the order that app has them (nested folders flatten
+to "Folder / Playlist"), and a "Files" child for browsing the stick's folders (those rows do
+not load). A source the app cannot read shows its problem as the branch's note.
 
 **What is never written.** Nothing on the stick is changed: it is only read, with no cache
 or index file. Nothing of it reaches your library either: no track, cue, grid, cover, stems
 row or playlist entry. These are refused: dropping or adding a guest track to a playlist
 ("Guest tracks can't be added to your playlists"), and deleting (moving to the Trash) a
-guest stick's rows or files ("A guest stick is never changed").
+guest stick's rows or files ("A guest stick is never changed"). The export window never
+offers a guest stick as a target; a stick Open Jockey exported to before (it holds Open
+Jockey's manifest) is still offered.
 
 **How a track plays.** It loads with its app's hotcues, saved loops and grid. Cues past the
-end of the file are dropped, with a message. A gridless track gets a BPM detected in memory
-only; a VirtualDJ track with a BPM but no first beat gets a grid starting at 0 s. Cover
+end of the file are dropped, with a message. Serato's grid comes from each file's `Serato
+Tempo Map` tag (or the older `Serato BeatGrid`). A track with no grid gets one detected in
+memory only, and so does a track whose app gives a BPM but no first beat (VirtualDJ) or a
+BPM outside 40 to 300. Cover
 lookup, cover removal and stems are not available for guest tracks. Guest rows show no length
 and no key (the stick gives none), so the list's footer shows its track count only.
 
