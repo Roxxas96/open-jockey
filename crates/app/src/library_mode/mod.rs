@@ -3651,18 +3651,34 @@ mod tests {
 
     #[test]
     fn the_stems_pace_is_sampled_only_when_the_queue_moves() {
-        let (_dir, mut mode, mut engine, mut renderer, printer, _calls, _entered, _release) =
+        let (_dir, mut mode, mut engine, mut renderer, printer, _calls, _entered, release) =
             two_in_the_queue();
+        // Getting there may move the queue once or twice: the two cache lookups can come
+        // back in one round, (0, 2), or in two, (0, 1) then (0, 2). Count from here.
+        assert_eq!(progress(&mode), Some((0, 2)));
+        assert_eq!(
+            mode.stems_sampled,
+            Some((0, 2)),
+            "the last move was sampled"
+        );
+        let moved = mode.stems_pace.samples();
+        assert!(moved >= 1);
         for _ in 0..50 {
             render(&mut renderer);
             mode.poll(Instant::now(), &mut engine, &printer);
         }
         assert_eq!(progress(&mode), Some((0, 2)));
-        assert!(
-            mode.stems_pace.samples() <= 1,
-            "{} samples of an unmoved queue",
-            mode.stems_pace.samples()
+        assert_eq!(
+            mode.stems_pace.samples(),
+            moved,
+            "50 rounds of an unmoved queue took samples"
         );
+        // The queue moves: one more sample.
+        release.send(()).unwrap();
+        run_until(&mut mode, &mut engine, &mut renderer, &printer, |m, _| {
+            progress(m) == Some((1, 2))
+        });
+        assert_eq!(mode.stems_pace.samples(), moved + 1);
         mode.shutdown(&mut engine, &printer);
         printer.finish();
     }
