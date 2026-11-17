@@ -331,4 +331,29 @@ impl Library {
             other => unreachable!("EditGrid reported {other:?}"),
         }
     }
+
+    /// `edit` applied to `current`, the grid of a track the library does not hold (a guest
+    /// stick's), with beat periods at `sample_rate`: nothing is read or written. A tap
+    /// counts with the earlier taps on `track`, as in [`Library::edit_grid`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Library::edit_grid`]'s [`LibraryError::Grid`]; a refused edit changes nothing.
+    pub fn edit_grid_in_memory(
+        &self,
+        track: i64,
+        current: Beatgrid,
+        edit: GridEdit,
+        playhead_frames: Option<f64>,
+        sample_rate: u32,
+    ) -> Result<Beatgrid, GridError> {
+        let edit = match edit {
+            GridEdit::Tap { at_micros } => self
+                .taps
+                .tap(track, at_micros)
+                .map_or(edit, GridEdit::SetBpm),
+            other => other,
+        };
+        edited(current, Some(sample_rate), edit, playhead_frames)
+    }
 }

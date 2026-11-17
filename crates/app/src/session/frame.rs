@@ -246,11 +246,13 @@ impl FrameParts {
                 overview,
                 detail,
                 stems: view.stems,
-                hotcue_marks: self
-                    .detail
-                    .as_ref()
-                    .map(|jobs| jobs.marks(i, view.load_seq))
-                    .unwrap_or_default(),
+                // A guest track's are the deck's own; the library has none.
+                hotcue_marks: view.hotcue_marks.unwrap_or_else(|| {
+                    self.detail
+                        .as_ref()
+                        .map(|jobs| jobs.marks(i, view.load_seq))
+                        .unwrap_or_default()
+                }),
             })
         });
         let jobs = jobs::gather(

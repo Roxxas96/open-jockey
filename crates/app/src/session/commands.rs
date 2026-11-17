@@ -255,15 +255,20 @@ fn library_step(
             }
         }
         LibraryStep::FindCover { track } => {
-            let found = parts.covers.as_ref().map_or_else(
-                || Err("Cover lookups are not running".to_owned()),
-                |covers| covers.find_now(track),
-            );
+            let found = crate::library_mode::guest_cover(track).and_then(|()| {
+                parts.covers.as_ref().map_or_else(
+                    || Err("Cover lookups are not running".to_owned()),
+                    |covers| covers.find_now(track),
+                )
+            });
             if let Err(why) = found {
                 parts.event(why);
             }
         }
         LibraryStep::RemoveCover { track } => {
+            if let Err(why) = crate::library_mode::guest_cover(track) {
+                return parts.event(why);
+            }
             // A "Find another cover" under way must not bring it back.
             if let Some(covers) = &parts.covers {
                 covers.removed(track);

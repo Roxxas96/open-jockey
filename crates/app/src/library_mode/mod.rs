@@ -9,6 +9,7 @@
 //! written with the non-blocking `Writer::submit`.
 
 mod delete;
+mod guest_decks;
 mod memory_sync;
 mod playlist_edits;
 mod stem_jobs;
@@ -38,10 +39,11 @@ use library::{
 
 use crate::console::ConsoleCommand;
 use crate::format::{bpm_text, grid_text, key_text, notation_from_setting, safe, track_name};
-use crate::guest::GuestSticks;
+use crate::guest::{GuestSticks, HotcueMarks};
 use crate::printer::Printer;
 use crate::session::jobs::{AnalysisFacts, Pace, StemsFacts, analysis_job, scan_job, stems_job};
 pub use delete::{SystemTrash, Trash};
+use guest_decks::GuestDeck;
 use memory_sync::{MemoryAction, MemorySync, engine_grid};
 use stem_jobs::{Reply, StemsControl, StemsSetup};
 use ui::{JobKind, JobOp, JobView};
@@ -86,6 +88,8 @@ struct DeckTrack {
     /// The decoded track, kept (with stems enabled) until its stems are asked for.
     buffer: Option<Arc<TrackBuffer>>,
     stems: DeckStems,
+    /// A guest stick's track: nothing of it is saved to the library.
+    guest: Option<GuestDeck>,
 }
 
 /// Where a deck's load is with its stems.
@@ -107,9 +111,10 @@ enum DeckStems {
 pub struct LibraryMode {
     lib: Arc<Library>,
     /// The guest sticks plugged in, found and read by the library worker; this side only
-    /// copies from it.
-    #[allow(dead_code, reason = "the browser rows and loads of tasks 7 and 8")]
+    /// copies from it, and keeps the session's edits of guest tracks there.
     sticks: Arc<GuestSticks>,
+    /// The sticks' [`GuestSticks::generation`] when the decks last looked for a removed one.
+    sticks_seen: u64,
     writer: Writer,
     analyzer: Option<Analyzer>,
     /// Tracks queued for analysis since the start, with their file as it was then. A
@@ -283,6 +288,7 @@ impl LibraryMode {
             writer: lib.writer(),
             lib,
             sticks,
+            sticks_seen: 0,
             analyzer: Some(analyzer),
             enqueued: HashMap::new(),
             queued_total: 0,
@@ -648,6 +654,24 @@ impl LibraryMode {
         }
         let rate = track.memory.rate();
         let playhead = engine.deck(deck).position_frames;
+        if track.guest.is_some() {
+            // Edited in memory from the grid the deck has.
+            let current = library::Beatgrid {
+                bpm: track
+                    .grid
+                    .map(|g| 60.0 * f64::from(rate) / g.beat_period_frames),
+                first_beat_frames: track.grid.map(|g| g.first_beat_frames),
+                grid_locked: false,
+            };
+            return Ok(Job::GuestGrid {
+                deck,
+                track: track.row.id,
+                current,
+                edit: grid_edit(edit, rate, playhead),
+                playhead,
+                sample_rate: rate,
+            });
+        }
         Ok(Job::Grid {
             deck,
             track: track.row.id,
@@ -669,6 +693,7 @@ impl LibraryMode {
             self.on_event(event, engine, printer);
         }
         self.sync_cues(engine, printer);
+        self.note_removed_sticks();
         let playing = DeckId::ALL.into_iter().any(|d| engine.deck(d).playing);
         self.set_playing(playing);
         self.poll_stems(playing, engine, printer);
@@ -689,6 +714,8 @@ impl LibraryMode {
                 let decks = DeckId::ALL
                     .into_iter()
                     .filter_map(|d| self.decks[d.index()].as_ref().map(|t| (d, t.row.id)))
+                    // The library has nothing of a guest track to read again.
+                    .filter(|&(_, id)| !GuestSticks::is_guest(id))
                     .collect();
                 let find_new_tracks = std::mem::take(&mut self.find_new_tracks);
                 self.send_job(
@@ -734,7 +761,11 @@ impl LibraryMode {
                     t.row.bpm = grid.bpm;
                 }
                 self.sync_grid(track, Some(&grid), engine);
-                self.refresh_wanted = true;
+                if GuestSticks::is_guest(track) {
+                    self.keep_guest_grid(track);
+                } else {
+                    self.refresh_wanted = true;
+                }
             }
             Event::NewTracks(ids) => self.enqueue_new(&ids),
             Event::FolderAdded => {
@@ -828,6 +859,13 @@ impl LibraryMode {
             return;
         }
         printer.event(format!("Deck {n} ◂ {}", track_name(&loaded.row)));
+        if let Some(dropped) = loaded.guest.as_ref().map(|g| g.dropped).filter(|&d| d > 0) {
+            printer.event(guest_decks::dropped_text(
+                deck,
+                dropped,
+                loaded.row.title.as_deref(),
+            ));
+        }
         let i = deck.index();
         // Counted from what the engine shows and from the loads sent before, in case one
         // of those is not applied yet.
@@ -837,6 +875,11 @@ impl LibraryMode {
         if !loaded.hotcues_read {
             memory = memory.without_hotcue_saves();
         }
+        let guest = loaded.guest.map(|guest| GuestDeck {
+            loaded: loaded.memory.clamped(frames),
+            marks: Arc::new(guest.marks),
+            gone: false,
+        });
         let incoming = DeckTrack {
             row: loaded.row,
             path: loaded.path,
@@ -844,8 +887,10 @@ impl LibraryMode {
             memory,
             grid: loaded.memory.clamped(frames).grid,
             audio,
-            buffer,
+            // A guest track has no stems.
+            buffer: buffer.filter(|_| guest.is_none()),
             stems: DeckStems::Unrequested,
+            guest,
         };
         // The outgoing track's changes keep being saved until the engine applies this load.
         // A track whose own load never showed had none: the earlier outgoing track then
@@ -977,8 +1022,13 @@ impl LibraryMode {
         saved
     }
 
-    /// Writes `actions` for `track` through to the library.
+    /// Writes `actions` for `track` through to the library; a guest track's are kept for
+    /// the session instead.
     fn save_memory(&mut self, track: &mut DeckTrack, actions: &[MemoryAction], printer: &Printer) {
+        if track.guest.is_some() {
+            self.keep_guest_memory(track, actions);
+            return;
+        }
         let id = track.row.id;
         for &action in actions {
             let op = match action {
@@ -1019,6 +1069,80 @@ impl LibraryMode {
                     self.refresh_wanted |= !track.row.has_cues;
                     track.row.has_cues = true;
                 }
+            }
+        }
+    }
+
+    /// Keeps `actions` on guest track `track` in [`GuestSticks`] for the session, and shows
+    /// the hotcue marks that are left on every deck holding it.
+    fn keep_guest_memory(&mut self, track: &mut DeckTrack, actions: &[MemoryAction]) {
+        let Some(guest) = track.guest.as_ref() else {
+            return;
+        };
+        if actions.is_empty() {
+            return;
+        }
+        let id = track.row.id;
+        let mut memory = self.sticks.hotcues(id).unwrap_or(guest.loaded);
+        let mut marks = (*guest.marks).clone();
+        guest_decks::apply(actions, &mut memory, &mut marks);
+        for &action in actions {
+            if let MemoryAction::DeleteHotcue(slot) = action {
+                self.deleted_hotcues.push((id, slot));
+            }
+        }
+        self.sticks.set_hotcues(id, memory);
+        track.row.has_cues = memory.cue > 0.0 || memory.hotcues.iter().any(Option::is_some);
+        self.show_guest_marks(id, marks, Some(track));
+    }
+
+    /// Keeps `marks` as guest track `id`'s hotcue colours and names, and shows them on
+    /// every deck holding it (`taken`, a deck's track taken out of [`Self::decks`], too).
+    fn show_guest_marks(&mut self, id: i64, marks: HotcueMarks, taken: Option<&mut DeckTrack>) {
+        self.sticks.set_marks(id, marks.clone());
+        let marks = Arc::new(marks);
+        let outgoing = self.outgoing.iter_mut().flatten().map(|(t, _)| t);
+        for t in self.decks.iter_mut().flatten().chain(outgoing).chain(taken) {
+            if let Some(guest) = t.guest.as_mut().filter(|_| t.row.id == id) {
+                guest.marks = Arc::clone(&marks);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Keeps the grid of guest track `track`, as its decks have it now, for the session.
+    fn keep_guest_grid(&mut self, track: i64) {
+        let Some((loaded, grid)) = self
+            .decks
+            .iter()
+            .flatten()
+            .find(|t| t.row.id == track)
+            .and_then(|t| Some((t.guest.as_ref()?.loaded, t.grid)))
+        else {
+            return;
+        };
+        let mut memory = self.sticks.hotcues(track).unwrap_or(loaded);
+        memory.grid = grid;
+        self.sticks.set_hotcues(track, memory);
+    }
+
+    /// Marks the guest decks whose stick was removed: they play on what was decoded, and
+    /// their title says so.
+    fn note_removed_sticks(&mut self) {
+        let generation = self.sticks.generation();
+        if generation == self.sticks_seen {
+            return;
+        }
+        self.sticks_seen = generation;
+        for t in self.decks.iter_mut().flatten() {
+            let Some(guest) = t.guest.as_mut().filter(|g| !g.gone) else {
+                continue;
+            };
+            if self.sticks.track(t.row.id).is_none() {
+                guest.gone = true;
+                let title = t.row.title.as_deref().unwrap_or("(untitled)");
+                t.row.title = Some(format!("{title} (stick removed)"));
+                self.dirty = true;
             }
         }
     }
@@ -1327,6 +1451,11 @@ impl LibraryMode {
             return;
         };
         let id = track.row.id;
+        if track.guest.is_some() {
+            // Nothing of a guest track is recorded, and it has no stems.
+            track.stems = DeckStems::Done;
+            return;
+        }
         if let Err(e) = self.writer.submit(WriteOp::TrackLoaded(id)) {
             printer.event(format!(
                 "warning: could not record the load of {}: {}",
@@ -1447,9 +1576,16 @@ impl LibraryMode {
         name: Option<String>,
         color: Option<u32>,
     ) -> Result<(), String> {
-        let current = self.decks[deck.index()].as_ref().map(|t| t.row.id);
-        if current != Some(track) {
+        let current = self.decks[deck.index()].as_ref();
+        if current.map(|t| t.row.id) != Some(track) {
             return Err("The track changed before the hotcue was saved".to_owned());
+        }
+        if let Some(guest) = current.and_then(|t| t.guest.as_ref()) {
+            // For the session only.
+            let mut marks = (*guest.marks).clone();
+            marks[slot.index()] = Some(ui::HotcueMark::new(color, name));
+            self.show_guest_marks(track, marks, None);
+            return Ok(());
         }
         let op = WriteOp::SetHotcueLabel {
             track,
@@ -1471,6 +1607,7 @@ impl LibraryMode {
     ///
     /// The library is closed.
     pub fn remove_cover(&self, track: i64) -> Result<(), String> {
+        guest_cover(track)?;
         self.submit_now(WriteOp::ClearCover { track })
     }
 
@@ -1501,6 +1638,9 @@ impl LibraryMode {
     /// caller's thread, and a lookup that finishes while the track is shown reaches the
     /// window without any browser refresh.
     pub fn cover_file(&self, track: i64) -> Option<PathBuf> {
+        if GuestSticks::is_guest(track) {
+            return None;
+        }
         self.covers.get(track, Instant::now())
     }
 
@@ -1511,6 +1651,7 @@ impl LibraryMode {
         let at = view.list_cursor.checked_sub(view.list_offset);
         if let Some(row) = at.and_then(|at| view.list.get_mut(at))
             && let Some(track) = row.track.as_ref().map(|t| t.id)
+            && !GuestSticks::is_guest(track)
         {
             row.cover_file = self.cover_file(track);
             if let Some(state) = self.covers.state(track) {
@@ -1542,6 +1683,7 @@ impl LibraryMode {
             audio: &track.audio,
             stems: self.stems_text(Some(track), snap),
             cover_file: self.cover_file(track.row.id),
+            hotcue_marks: track.guest.as_ref().map(|g| Arc::clone(&g.marks)),
         })
     }
 
@@ -1743,6 +1885,8 @@ pub struct DeckView<'a> {
     pub stems: Option<String>,
     /// The cover the library kept for the track, when one was found.
     pub cover_file: Option<PathBuf>,
+    /// A guest track's hotcue colours and names, kept by the deck (the library has none).
+    pub hotcue_marks: Option<Arc<HotcueMarks>>,
 }
 
 /// A cue point or one hotcue slot of a track.
@@ -1754,6 +1898,19 @@ enum Spot {
 
 /// What a cue or hotcue write stores: the frames bits and the loop length bits, if any.
 type Stored = (u64, Option<u64>);
+
+/// The refusal of a cover change for a guest track: its cover is never looked up or kept.
+///
+/// # Errors
+///
+/// `track` is a guest stick's.
+pub(crate) fn guest_cover(track: i64) -> Result<(), String> {
+    if GuestSticks::is_guest(track) {
+        Err("A guest track's cover is not changed".to_owned())
+    } else {
+        Ok(())
+    }
+}
 
 /// `name` trimmed, if it is not empty.
 fn trimmed_name(name: &str) -> Result<String, String> {
@@ -1948,6 +2105,7 @@ pub(crate) mod testing {
             memory: engine::TrackMemory::default(),
             hotcues_read: true,
             refuse_if_playing: false,
+            guest: None,
         }
     }
 }
@@ -2482,6 +2640,7 @@ mod tests {
             audio: short_track(),
             buffer: None,
             stems: DeckStems::Unrequested,
+            guest: None,
         });
         assert!(
             refused(&mode).contains("still loading"),
