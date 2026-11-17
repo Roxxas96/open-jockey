@@ -268,6 +268,20 @@ pub fn show_guest_stick(frame: &mut ControlFrame) {
     browser.tree_cursor = 3;
     browser.path = "OJGUEST ▸ Serato ▸ Friday set".into();
     browser.playlist = None;
+    // A guest row has a BPM at most: the app reads no length or key from the stick, so the
+    // Length and Key cells are blank and the list has no total.
+    for row in browser.list.iter_mut().filter_map(|r| r.track.as_mut()) {
+        row.duration_frames = None;
+        row.sample_rate = None;
+        row.key = None;
+    }
+    browser.track = browser.track.take().map(|mut row| {
+        row.duration_frames = None;
+        row.sample_rate = None;
+        row.key = None;
+        row
+    });
+    browser.list_seconds = None;
 }
 
 /// Two decks (four with `four_decks`) loaded and playing at 126 BPM, with a key, a grid

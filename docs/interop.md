@@ -141,7 +141,8 @@ guest stick's rows or files ("A guest stick is never changed").
 **How a track plays.** It loads with its app's hotcues, saved loops and grid. Cues past the
 end of the file are dropped, with a message. A gridless track gets a BPM detected in memory
 only; a VirtualDJ track with a BPM but no first beat gets a grid starting at 0 s. Cover
-lookup, cover removal and stems are not available for guest tracks.
+lookup, cover removal and stems are not available for guest tracks. Guest rows show no length
+and no key (the stick gives none), so the list's footer shows its track count only.
 
 **Edits last for the session.** Hotcue, label and grid edits on a guest deck are kept in
 memory, so a reload shows them, but they are lost when the stick is unplugged.

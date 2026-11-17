@@ -249,7 +249,7 @@ and nothing is deleted.
   crates, and a "Files" child for the stick's own folders. A source the app cannot read
   shows why as a note after the branch's name. The stick's rows have no Rename or Delete, and
   its tracks cannot be dropped onto your playlists; see
-  [Guest sticks](interop.md#guest-sticks). Its cover menu items (Find a cover, Remove cover)
+  [Guest sticks](interop.md#guest-sticks). Its cover menu items (Find another cover, Remove cover)
   are greyed out.
 - **Panels:** the dividers, the info panel and the sideview are described in
   [Dividers, folding and the sideview](#dividers-folding-and-the-sideview).
