@@ -24,6 +24,11 @@ Changes from the stick, so the repo carries no personal data and stays small:
 - **rekordbox device library** (`PIONEER/rekordbox/export.pdb`, `PIONEER/USBANLZ`, files under `Contents/`):
   - playlist `OJ Rekordbox A` = 120, 128, 126 (the same as `rekordbox.xml`).
   - grids: 120.wav at **149.96 BPM** (rekordbox misread it; a real wrong grid), 126 at 126.00, 128 at 128.00.
+  - cues and loops in the `ANLZ` files equal `rekordbox.xml`'s within 1 ms, with the same names and
+    the same palette colours. One difference: a cue with no colour of its own has palette code 0 on the
+    device, with the player's LED colour (RGB) instead of the app's default for the slot that
+    `rekordbox.xml` writes. The device value is what the device reader gives: 126.mp3 A #FF0017,
+    B #00C4FF, C #33FF00; 128.mp3 A #FF0017, C #33FF00 (xml: #FF376F, #45ACDB, #7DC13D for the same).
   - `rekordbox.xml` (same session):
     - 120.wav: A 5.216 s "Test 3" (180,190,4), B 22.820 s "TEst" (255,18,123), C 44.026 s "Test 2" (170,114,255),
       D a loop 30.422–32.023 s (255,140,0).
