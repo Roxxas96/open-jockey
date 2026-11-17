@@ -9,7 +9,8 @@ use std::rc::Rc;
 use super::anlz::{AnlzData, read_anlz};
 use super::pdb::{NodeRow, PdbLibrary, read_pdb};
 use super::{
-    GuestApp, GuestPlaylist, GuestSource, GuestTrack, dir_on_stick, on_stick, track_from_tags,
+    GuestApp, GuestPlaylist, GuestSource, GuestTrack, MAX_DEPTH, MAX_NAME_BYTES, MAX_PLAYLISTS,
+    dir_on_stick, join_name, on_stick, read_capped, track_from_tags,
 };
 
 /// The largest `export.pdb` read.
@@ -36,18 +37,10 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
         source.problem = Some("export.pdb is outside this stick".into());
         return Some(source);
     };
-    let bytes = match std::fs::metadata(&pdb) {
-        Ok(m) if m.len() > MAX_PDB_BYTES => {
-            source.problem = Some("export.pdb is too large to read".into());
-            return Some(source);
-        }
-        Ok(_) => std::fs::read(&pdb),
-        Err(e) => Err(e),
-    };
-    let bytes = match bytes {
+    let bytes = match read_capped(&pdb, MAX_PDB_BYTES) {
         Ok(b) => b,
         Err(e) => {
-            source.problem = Some(format!("export.pdb could not be read: {e}"));
+            source.problem = Some(format!("export.pdb {e}"));
             return Some(source);
         }
     };
@@ -90,6 +83,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
             }
             Ok(None) => {}
             Err(Refused::Outside) => counts.anlz_refused += 1,
+            Err(Refused::Missing) => counts.anlz_missing += 1,
             Err(Refused::Unreadable) => counts.anlz_unreadable += 1,
         }
         ids.insert(row.id, source.tracks.len());
@@ -108,6 +102,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
 struct Counts {
     tracks_refused: usize,
     anlz_refused: usize,
+    anlz_missing: usize,
     anlz_unreadable: usize,
     /// The pdb held more rows than are read.
     truncated: bool,
@@ -130,6 +125,12 @@ impl Counts {
                 self.anlz_refused
             ));
         }
+        if self.anlz_missing > 0 {
+            out.push(format!(
+                "{} analysis file(s) are missing from this stick",
+                self.anlz_missing
+            ));
+        }
         if self.anlz_unreadable > 0 {
             out.push(format!(
                 "{} analysis file(s) could not be read",
@@ -148,6 +149,8 @@ impl Counts {
 
 enum Refused {
     Outside,
+    /// Named by the pdb but not on the stick (a partly copied `USBANLZ`).
+    Missing,
     Unreadable,
 }
 
@@ -157,7 +160,12 @@ fn analysis(root: &Path, analyze_path: &str) -> Result<Option<(AnlzData, bool)>,
         return Ok(None);
     }
     let dat = stick_path(root, analyze_path).ok_or(Refused::Outside)?;
-    let dat = on_stick(root, &dat).ok_or(Refused::Outside)?;
+    let dat = match on_stick(root, &dat) {
+        Some(dat) => dat,
+        // Neither a file nor a link: nothing is there to be outside the stick.
+        None if dat.symlink_metadata().is_err() => return Err(Refused::Missing),
+        None => return Err(Refused::Outside),
+    };
     // An `.EXT` that is there but not on the stick is refused, not silently left out.
     let ext_path = dat.with_extension("EXT");
     let ext = on_stick(root, &ext_path);
@@ -186,24 +194,6 @@ fn stick_path(root: &Path, stored: &str) -> Option<PathBuf> {
         any = true;
     }
     any.then_some(out)
-}
-
-/// The deepest folder nesting followed.
-const MAX_DEPTH: usize = 32;
-/// The most playlists built, and the most bytes their names take together.
-const MAX_PLAYLISTS: usize = 10_000;
-const MAX_NAME_BYTES: usize = 32 * 1024 * 1024;
-/// The longest flattened name, in characters.
-const MAX_NAME_CHARS: usize = 1024;
-
-/// `prefix / name`, cut to the longest name kept.
-fn join_name(prefix: &str, name: &str) -> String {
-    let joined = if prefix.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{prefix} / {name}")
-    };
-    joined.chars().take(MAX_NAME_CHARS).collect()
 }
 
 /// The playlists of the tree in tree order (each folder's children by `sort_order`, folders

@@ -274,3 +274,175 @@ fn a_metadata_symlink_out_of_the_stick_is_never_read() {
     let problem = source.problem.as_deref().expect("a problem");
     assert!(problem.contains("outside this stick"), "{problem}");
 }
+
+/// Writes `head` at the start of `path` and stretches the file to `len` bytes (sparse where
+/// the file system allows), so a size cap can be tested without writing the bytes.
+fn oversize(path: &Path, len: u64, head: &[u8]) {
+    fs::write(path, head).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(len)
+        .unwrap();
+}
+
+const MIB: u64 = 1024 * 1024;
+
+#[test]
+fn oversize_serato_files_are_problems() {
+    // A record header claiming a huge body, so a read past the cap fails fast, not slowly.
+    let head = [b'o', b't', b'r', b'k', 0x7F, 0xFF, 0xFF, 0xFF];
+    let cases = [
+        (
+            ["_Serato_", "database V2"].as_slice(),
+            256 * MIB + 1,
+            "database V2",
+        ),
+        (
+            ["_Serato_", "Subcrates", "OJ Serato B.crate"].as_slice(),
+            16 * MIB + 1,
+            "OJ Serato B.crate",
+        ),
+        (
+            ["_Serato_", "neworder.pref"].as_slice(),
+            16 * MIB + 1,
+            "neworder.pref",
+        ),
+    ];
+    for (parts, len, name) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("OJGUEST");
+        copy_dir(&fixture(), &root);
+        let path = parts.iter().fold(root.clone(), |p, part| p.join(part));
+        oversize(&path, len, &head);
+        let stick = read_stick(&root, "OJGUEST");
+        let source = serato(&stick);
+        let problem = source.problem.as_deref().expect("a problem");
+        assert!(problem.contains(name), "{name}: {problem}");
+        assert!(problem.contains("too large"), "{name}: {problem}");
+        // Crate A is still read.
+        assert!(source.playlists.iter().any(|p| p.name == "OJ Serato A"));
+    }
+}
+
+#[test]
+fn serato_grid_from_the_tempo_map() {
+    let stick = read_stick(&fixture(), "OJGUEST");
+    let source = serato(&stick);
+    // 120.wav: the map's first beat (the audio's second click, at 0.5 s) and its BPM.
+    let wav = track_named(source, "OJ Click 120");
+    assert!((wav.first_beat.unwrap() - 0.499_423_485).abs() < 1e-6);
+    assert!((wav.bpm.unwrap() - 119.995_584).abs() < 1e-5);
+    // 126.mp3: the map's seconds less the Info-frame shift, as for its cues.
+    let mp3 = track_named(source, "OJ Click 126");
+    let rate = f64::from(
+        library::tags::read(&fixture().join("Serato").join("OJ Click 126.mp3"))
+            .sample_rate
+            .unwrap(),
+    );
+    let want = 0.531_400_496 - 1152.0 / rate;
+    assert!((mp3.first_beat.unwrap() - want).abs() < 1e-6);
+    assert!((mp3.bpm.unwrap() - 126.000_728).abs() < 1e-5);
+}
+
+#[test]
+fn serato_mp3_cues_match_what_serato_wrote() {
+    // The README's 126.mp3 cue 1: 7954 ms as Serato stored it, read back less the
+    // Info-frame shift. Pins the shift's direction against a file Serato wrote.
+    let stick = read_stick(&fixture(), "OJGUEST");
+    let source = serato(&stick);
+    let rate = f64::from(
+        library::tags::read(&fixture().join("Serato").join("OJ Click 126.mp3"))
+            .sample_rate
+            .unwrap(),
+    );
+    let track = track_named(source, "OJ Click 126");
+    for (slot, ms, color) in [
+        (0, 7954.0, 0xCC0000),
+        (1, 29418.0, 0xCC8800),
+        (2, 44451.0, 0x0000CC),
+    ] {
+        let cue = track.hotcues.iter().find(|c| c.slot == slot).unwrap();
+        let want = ms / 1000.0 - 1152.0 / rate;
+        assert!(
+            (cue.seconds - want).abs() < 1e-6,
+            "slot {slot}: {}",
+            cue.seconds
+        );
+        assert_eq!(cue.color, Some(color), "slot {slot}");
+    }
+}
+
+#[test]
+fn serato_grid_from_a_beatgrid_tag() {
+    // Export writes `Serato BeatGrid` and drops the other Serato frames (the tempo map).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    for (file, kind) in [
+        ("OJ Click 120.wav", FileKind::Wav),
+        ("OJ Click 126.mp3", FileKind::Mp3),
+    ] {
+        let path = root.join("Serato").join(file);
+        let rate = library::tags::read(&path).sample_rate.unwrap();
+        let t = ExportTrack {
+            id: 1,
+            path: path.clone(),
+            fingerprint: [0; 32],
+            size: 1,
+            title: file.into(),
+            artist: None,
+            album: None,
+            genre: None,
+            sample_rate: rate,
+            duration_frames: None,
+            bpm: Some(124.5),
+            first_beat_frames: Some(0.25 * f64::from(rate)),
+            key: None,
+            cue_frames: None,
+            hotcues: Default::default(),
+            kind,
+            lead_in: decode::lead_in(&path).unwrap(),
+        };
+        write_tags(&path, &t)
+            .map_err(|e: ExportError| e.to_string())
+            .unwrap();
+    }
+    let stick = read_stick(&root, "OJGUEST");
+    let source = serato(&stick);
+    for title in ["OJ Click 120", "OJ Click 126"] {
+        let track = track_named(source, title);
+        assert!((track.bpm.unwrap() - 124.5).abs() < 1e-4, "{title}");
+        let first = track.first_beat.unwrap();
+        assert!((first - 0.25).abs() < 0.001, "{title}: {first}");
+    }
+}
+
+#[test]
+fn serato_entries_for_missing_files_are_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    fs::remove_file(root.join("Serato").join("OJ Click 126.mp3")).unwrap();
+    let stick = read_stick(&root, "OJGUEST");
+    let source = serato(&stick);
+    assert_eq!(source.tracks.len(), 2);
+    let b = source
+        .playlists
+        .iter()
+        .find(|p| p.name == "OJ Serato B")
+        .unwrap();
+    assert!(b.tracks.is_empty());
+    let problem = source.problem.as_deref().expect("a problem");
+    // The database's 126 and its entries in crates A and B.
+    assert!(
+        problem.contains("1 database V2 track is not on this stick"),
+        "{problem}"
+    );
+    assert!(
+        problem.contains("2 crate entries point at files that are not on this stick"),
+        "{problem}"
+    );
+    assert!(!problem.contains("outside"), "{problem}");
+}

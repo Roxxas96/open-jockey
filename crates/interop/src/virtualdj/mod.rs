@@ -6,8 +6,10 @@ mod playlists;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use database::read_database_capped;
 pub use database::{VdjPoi, VdjSong, read_database};
 pub use import::plan_virtualdj;
+pub(crate) use playlists::read_playlists_capped;
 pub use playlists::{VdjPlaylist, read_playlists};
 
 /// A failure reading VirtualDJ's files or the library an import goes into.
@@ -20,6 +22,9 @@ pub enum InteropError {
     },
     #[error("{} is not a valid VirtualDJ file: {why}", path.display())]
     Format { path: PathBuf, why: String },
+    /// A file larger than a guest-stick read allows; nothing of it was read.
+    #[error("{} is too large to read", path.display())]
+    TooLarge { path: PathBuf },
     #[error(transparent)]
     Library(#[from] library::LibraryError),
 }
@@ -53,9 +58,19 @@ pub fn find_sources(home_dirs: &[PathBuf], volumes: &[PathBuf]) -> VdjSources {
     sources
 }
 
-pub(crate) fn read_file(path: &Path) -> Result<Vec<u8>, InteropError> {
-    std::fs::read(path).map_err(|source| InteropError::Io {
+/// The bytes of `path`; with `max`, [`InteropError::TooLarge`] for a larger file, unread.
+pub(crate) fn read_file_capped(path: &Path, max: Option<u64>) -> Result<Vec<u8>, InteropError> {
+    let io = |source| InteropError::Io {
         path: path.to_path_buf(),
         source,
+    };
+    let Some(max) = max else {
+        return std::fs::read(path).map_err(io);
+    };
+    crate::guest::read_capped(path, max).map_err(|e| match e {
+        crate::guest::ReadError::TooLarge => InteropError::TooLarge {
+            path: path.to_path_buf(),
+        },
+        crate::guest::ReadError::Io(source) => io(source),
     })
 }

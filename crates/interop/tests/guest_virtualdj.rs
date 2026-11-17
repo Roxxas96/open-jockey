@@ -204,3 +204,85 @@ fn a_symlink_out_of_the_stick_is_never_read() {
     let problem = source.problem.as_deref().expect("a problem");
     assert!(problem.contains("not on this stick"), "{problem}");
 }
+
+/// Writes `head` at the start of `path` and stretches the file to `len` bytes (sparse where
+/// the file system allows), so a size cap can be tested without writing the bytes.
+fn oversize(path: &Path, len: u64, head: &[u8]) {
+    fs::write(path, head).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(len)
+        .unwrap();
+}
+
+const MIB: u64 = 1024 * 1024;
+
+#[test]
+fn an_oversize_virtualdj_database_is_a_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    oversize(
+        &root.join("VirtualDJ").join("database.xml"),
+        256 * MIB + 1,
+        b"<VirtualDJ_Database>",
+    );
+    let stick = read_stick(&root, "OJGUEST");
+    let source = vdj(&stick);
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("too large"), "{problem}");
+    // The lists are still read.
+    assert_eq!(source.playlists[0].tracks.len(), 3);
+}
+
+#[test]
+fn oversize_virtualdj_lists_and_order_are_problems() {
+    for name in ["big.vdjfolder", "big.m3u", "order"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("OJGUEST");
+        copy_dir(&fixture(), &root);
+        let lists = root.join("VirtualDJ").join("MyLists");
+        oversize(&lists.join(name), 16 * MIB + 1, b"<VirtualFolder>\n");
+        let stick = read_stick(&root, "OJGUEST");
+        let source = vdj(&stick);
+        let problem = source.problem.as_deref().expect("a problem");
+        assert!(problem.contains("too large"), "{name}: {problem}");
+        let a = source
+            .playlists
+            .iter()
+            .find(|p| p.name == "OJ VDJ A")
+            .unwrap();
+        assert_eq!(a.tracks.len(), 3, "{name}");
+    }
+}
+
+#[test]
+fn a_list_path_with_very_many_parts_is_dropped_quickly() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("OJGUEST");
+    copy_dir(&fixture(), &root);
+    let list = root
+        .join("VirtualDJ")
+        .join("MyLists")
+        .join("OJ VDJ A.vdjfolder");
+    let deep = format!("/{}VirtualDJ tracks/OJ Click 126.mp3", "a/".repeat(100_000));
+    let text = fs::read_to_string(&list).unwrap().replace(
+        "</VirtualFolder>",
+        &format!("<song path=\"{deep}\" />\n</VirtualFolder>"),
+    );
+    fs::write(&list, text).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let at = root.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_stick(&at, "OJGUEST"));
+    });
+    let stick = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the stick is read in time");
+    let source = vdj(&stick);
+    assert_eq!(source.playlists[0].tracks.len(), 3);
+    let problem = source.problem.as_deref().expect("a problem");
+    assert!(problem.contains("not on this stick"), "{problem}");
+}

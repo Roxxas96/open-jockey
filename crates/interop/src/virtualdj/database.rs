@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
-use super::{InteropError, read_file};
+use super::{InteropError, read_file_capped};
 
 /// A song entry of the database.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,7 +46,16 @@ pub enum VdjPoi {
 
 /// Reads every song of a database; `drive_root` maps a per-drive database's `X:/` paths.
 pub fn read_database(path: &Path, drive_root: Option<&Path>) -> Result<Vec<VdjSong>, InteropError> {
-    let bytes = read_file(path)?;
+    read_database_capped(path, drive_root, None)
+}
+
+/// [`read_database`], refusing a file of more than `max` bytes when given.
+pub(crate) fn read_database_capped(
+    path: &Path,
+    drive_root: Option<&Path>,
+    max: Option<u64>,
+) -> Result<Vec<VdjSong>, InteropError> {
+    let bytes = read_file_capped(path, max)?;
     let format = |why: String| InteropError::Format {
         path: path.to_path_buf(),
         why,

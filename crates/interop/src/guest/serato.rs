@@ -1,13 +1,14 @@
-//! The Serato branch of a guest stick: `_Serato_/database V2`, `Subcrates` and the cues in
-//! each file's `Serato Markers2` tag.
+//! The Serato branch of a guest stick: `_Serato_/database V2`, `Subcrates`, and the cues and
+//! grid in each file's `Serato Markers2` and `Serato Tempo Map` (or older `Serato BeatGrid`)
+//! tags.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, dir_on_stick, on_stick as confined,
-    track_from_tags,
+    GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, MAX_DATABASE_BYTES, MAX_LIST_BYTES,
+    dir_on_stick, on_stick as confined, read_capped, track_from_tags,
 };
 use crate::export::FileKind;
 use crate::export::serato::markers::{Marker, read_markers2};
@@ -18,6 +19,8 @@ use crate::export::timing::SERATO_INFO_FRAME_FRAMES;
 /// Slots of a guest hotcue.
 const SLOTS: u8 = 8;
 const MARKERS2: &str = "Serato Markers2";
+const TEMPO_MAP: &str = "Serato Tempo Map";
+const BEATGRID: &str = "Serato BeatGrid";
 
 /// Reads the stick's Serato data, or `None` without the `_Serato_` folder.
 pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<GuestSource> {
@@ -33,7 +36,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
         problem: None,
     };
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
-    let mut outside = 0;
+    let mut paths = Paths::default();
 
     if !dir_on_stick(root, &dir) {
         source.problem = Some("_Serato_ is outside this stick".into());
@@ -43,17 +46,17 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     if database.is_file() && confined(root, &database).is_none() {
         problems.push("database V2 is outside this stick".to_owned());
     } else if database.is_file() {
-        match fs::read(&database)
-            .map_err(|e| e.to_string())
-            .and_then(|b| decode(&b))
+        match read_capped(&database, MAX_DATABASE_BYTES)
+            .map_err(|e| format!("database V2 {e}"))
+            .and_then(|b| decode(&b).map_err(|e| format!("database V2: {e}")))
         {
             Ok(records) => {
                 for record in records.iter().filter(|r| &r.tag == b"otrk") {
                     let Body::Records(fields) = &record.body else {
                         continue;
                     };
-                    let Some(path) =
-                        text(fields, b"pfil").and_then(|p| on_stick(root, &p, &mut outside))
+                    let Some(path) = text(fields, b"pfil")
+                        .and_then(|p| on_stick(root, &p, &mut paths, Entry::Database))
                     else {
                         continue;
                     };
@@ -64,7 +67,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
                     source.tracks.push(track(path, fields));
                 }
             }
-            Err(e) => problems.push(format!("database V2: {e}")),
+            Err(e) => problems.push(e),
         }
     }
 
@@ -73,7 +76,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
     if !crates_ok && crates.exists() {
         problems.push("Subcrates is outside this stick".to_owned());
     }
-    for (name, file) in crate_files(root, &crates, &dir)
+    for (name, file) in crate_files(root, &crates, &dir, &mut problems)
         .into_iter()
         .filter(|_| crates_ok)
     {
@@ -81,13 +84,13 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
             problems.push(format!("{name}.crate is outside this stick"));
             continue;
         }
-        let records = match fs::read(&file)
-            .map_err(|e| e.to_string())
-            .and_then(|b| decode(&b))
+        let records = match read_capped(&file, MAX_LIST_BYTES)
+            .map_err(|e| format!("{name}.crate {e}"))
+            .and_then(|b| decode(&b).map_err(|e| format!("{name}.crate: {e}")))
         {
             Ok(r) => r,
             Err(e) => {
-                problems.push(format!("{name}.crate: {e}"));
+                problems.push(e);
                 continue;
             }
         };
@@ -96,7 +99,8 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
             let Body::Records(fields) = &record.body else {
                 continue;
             };
-            let Some(path) = text(fields, b"ptrk").and_then(|p| on_stick(root, &p, &mut outside))
+            let Some(path) =
+                text(fields, b"ptrk").and_then(|p| on_stick(root, &p, &mut paths, Entry::Crate))
             else {
                 continue;
             };
@@ -111,12 +115,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
             tracks,
         });
     }
-    if outside > 0 {
-        problems.push(format!(
-            "{outside} {} outside this stick",
-            if outside == 1 { "path is" } else { "paths are" }
-        ));
-    }
+    problems.extend(paths.problems());
     if !problems.is_empty() {
         source.problem = Some(problems.join("; "));
     }
@@ -146,18 +145,31 @@ fn track(path: PathBuf, fields: &[Record]) -> GuestTrack {
     }
     track.bpm = field(b"tbpm")
         .and_then(|b| b.trim().parse::<f64>().ok())
-        .filter(|b| *b > 0.0);
+        .filter(|b| b.is_finite() && *b > 0.0);
     track_with_cues(track)
 }
 
-/// `track` with the hotcues of its file's `Serato Markers2` tag.
+/// `track` with the hotcues of its file's `Serato Markers2` tag and, when the file has one,
+/// the grid of its `Serato Tempo Map` or `Serato BeatGrid` tag (whose BPM replaces the
+/// database's, so the two belong to one grid).
 fn track_with_cues(mut track: GuestTrack) -> GuestTrack {
-    track.hotcues = cues_of(&track.path);
+    let (cues, grid) = tags_of(&track.path);
+    track.hotcues = cues;
+    if let Some((first_beat, bpm)) = grid {
+        track.first_beat = Some(first_beat);
+        track.bpm = Some(bpm);
+    }
     track
 }
 
-/// The crate files of `crates` as (stem, path), in `neworder.pref` order and then by name.
-fn crate_files(root: &Path, crates: &Path, serato_dir: &Path) -> Vec<(String, PathBuf)> {
+/// The crate files of `crates` as (stem, path), in `neworder.pref` order and then by name. A
+/// `neworder.pref` that cannot be read leaves the by-name order and adds a problem.
+fn crate_files(
+    root: &Path,
+    crates: &Path,
+    serato_dir: &Path,
+    problems: &mut Vec<String>,
+) -> Vec<(String, PathBuf)> {
     let Ok(entries) = fs::read_dir(crates) else {
         return Vec::new();
     };
@@ -173,10 +185,14 @@ fn crate_files(root: &Path, crates: &Path, serato_dir: &Path) -> Vec<(String, Pa
         .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let pref = serato_dir.join("neworder.pref");
-    let listed = confined(root, &pref)
-        .and_then(|p| fs::read(p).ok())
-        .map(|b| utf16be(&b))
-        .unwrap_or_default();
+    let listed = match confined(root, &pref).map(|p| read_capped(&p, MAX_LIST_BYTES)) {
+        Some(Ok(bytes)) => utf16be(&bytes),
+        Some(Err(e)) => {
+            problems.push(format!("neworder.pref {e}"));
+            String::new()
+        }
+        None => String::new(),
+    };
     let order: Vec<&str> = listed
         .trim_start_matches('\u{feff}')
         .lines()
@@ -187,31 +203,90 @@ fn crate_files(root: &Path, crates: &Path, serato_dir: &Path) -> Vec<(String, Pa
     files
 }
 
+/// Where a path in Serato's files was read from, for the count of missing files.
+#[derive(Clone, Copy)]
+enum Entry {
+    Database,
+    Crate,
+}
+
+/// The paths a read refused or did not find.
+#[derive(Default)]
+struct Paths {
+    outside: usize,
+    missing_tracks: usize,
+    missing_entries: usize,
+}
+
+impl Paths {
+    fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let n = self.outside;
+        if n > 0 {
+            let what = if n == 1 { "path is" } else { "paths are" };
+            out.push(format!("{n} {what} outside this stick"));
+        }
+        let n = self.missing_tracks;
+        if n > 0 {
+            let what = if n == 1 { "track is" } else { "tracks are" };
+            out.push(format!("{n} database V2 {what} not on this stick"));
+        }
+        let n = self.missing_entries;
+        if n > 0 {
+            let what = if n == 1 {
+                "entry points"
+            } else {
+                "entries point"
+            };
+            out.push(format!(
+                "{n} crate {what} at files that are not on this stick"
+            ));
+        }
+        out
+    }
+}
+
 /// Joins a root-relative path with `/` separators onto `root`, one component at a time;
-/// `None` when it climbs out of the stick or names no file; a file that exists but lies
-/// outside the stick is counted in `outside`.
-fn on_stick(root: &Path, raw: &str, outside: &mut usize) -> Option<PathBuf> {
+/// `None` when it climbs out of the stick or names no file. A `..` path and a file that exists
+/// but lies outside the stick are counted as outside; any other miss as missing.
+fn on_stick(root: &Path, raw: &str, paths: &mut Paths, entry: Entry) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
+    let mut climbs = false;
     for part in raw.replace('\\', "/").split('/').filter(|p| !p.is_empty()) {
+        climbs |= part == "..";
         path.push(part);
     }
     let found = confined(root, &path);
-    if found.is_none() && path.is_file() {
-        *outside += 1;
+    if found.is_none() {
+        if climbs || path.is_file() {
+            paths.outside += 1;
+        } else {
+            match entry {
+                Entry::Database => paths.missing_tracks += 1,
+                Entry::Crate => paths.missing_entries += 1,
+            }
+        }
     }
     found
 }
 
-/// The hotcues in `path`'s `Serato Markers2` tag, with an MP3's Info-frame shift removed
-/// (the inverse of what export adds).
-fn cues_of(path: &Path) -> Vec<GuestCue> {
+/// The hotcues in `path`'s `Serato Markers2` tag and the grid (first beat in seconds, BPM)
+/// of its `Serato Tempo Map`, else of its `Serato BeatGrid`, with an MP3's Info-frame shift
+/// removed from both (the inverse of what export adds).
+fn tags_of(path: &Path) -> (Vec<GuestCue>, Option<(f64, f64)>) {
     let kind = FileKind::of(path);
     let Ok(Some(tag)) = read_id3(path, &kind) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    let Some(data) = serato_frames(&tag).remove(MARKERS2) else {
-        return Vec::new();
-    };
+    let mut frames = serato_frames(&tag);
+    let markers = frames.remove(MARKERS2);
+    let grid = frames
+        .get(TEMPO_MAP)
+        .and_then(|d| tempo_map(d))
+        .or_else(|| frames.get(BEATGRID).and_then(|d| beatgrid(d)));
+    if markers.is_none() && grid.is_none() {
+        return (Vec::new(), None);
+    }
     let shift = if kind == FileKind::Mp3 && decode::lead_in(path).is_ok_and(|l| l.gapless_header) {
         library::tags::read(path)
             .sample_rate
@@ -220,7 +295,50 @@ fn cues_of(path: &Path) -> Vec<GuestCue> {
     } else {
         0.0
     };
-    cues_from_markers(read_markers2(&data), shift)
+    let cues = markers.map_or_else(Vec::new, |data| {
+        cues_from_markers(read_markers2(&data), shift)
+    });
+    (cues, grid.map(|(first, bpm)| (first - shift, bpm)))
+}
+
+/// The first beat (seconds) and BPM of a `Serato Tempo Map` frame, as Serato DJ writes it
+/// (version 2): the first segment's beat position, a big-endian `f64` at byte 4, and its BPM,
+/// an `f64` at byte 24. The layout is read off the fixture's files (see its README), not a
+/// published format; anything else gives `None`.
+fn tempo_map(data: &[u8]) -> Option<(f64, f64)> {
+    if data.first() != Some(&2) {
+        return None;
+    }
+    let f64_at = |at: usize| {
+        let bytes: [u8; 8] = data.get(at..at + 8)?.try_into().ok()?;
+        Some(f64::from_be_bytes(bytes))
+    };
+    let (first, bpm) = (f64_at(4)?, f64_at(24)?);
+    (first.is_finite() && bpm.is_finite() && bpm > 0.0).then_some((first, bpm))
+}
+
+/// The first beat (seconds) and first segment's BPM of a `Serato BeatGrid` frame: `01 00`, a
+/// `u32` marker count, then 8-byte markers of an `f32` position and either the beats to the
+/// next marker or, on the last one, an `f32` BPM. `None` when damaged.
+fn beatgrid(data: &[u8]) -> Option<(f64, f64)> {
+    if data.get(..2)? != [1, 0] {
+        return None;
+    }
+    let u32_at = |at: usize| Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    let f32_at = |at: usize| u32_at(at).map(|b| f64::from(f32::from_bits(b)));
+    let count = u32_at(2)?;
+    let first = f32_at(6)?;
+    let bpm = if count == 1 {
+        f32_at(10)?
+    } else {
+        let beats = f64::from(u32_at(10)?);
+        let span = f32_at(14)? - first;
+        if count == 0 || span <= 0.0 {
+            return None;
+        }
+        beats * 60.0 / span
+    };
+    (first.is_finite() && bpm.is_finite() && bpm > 0.0).then_some((first, bpm))
 }
 
 /// Hotcues from `markers`, `shift` seconds earlier. A slot holds one cue: a cue wins over a
