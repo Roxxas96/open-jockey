@@ -19,8 +19,8 @@ const PAGE_HEADER_BYTES: usize = 0x28;
 const GROUP_BYTES: usize = 36;
 /// How many tables the header may list.
 const MAX_TABLES: usize = 64;
-/// The most rows read from one file, so a crafted one cannot grow the library without bound.
-const MAX_ROWS: usize = 1_000_000;
+/// The longest string read; a row declaring more has that string treated as absent.
+const MAX_STRING_BYTES: usize = 4096;
 /// The smallest and largest page size accepted.
 const PAGE_SIZE_RANGE: std::ops::RangeInclusive<usize> = 512..=1 << 20;
 
@@ -64,6 +64,8 @@ pub(crate) struct PdbLibrary {
     pub entries: Vec<(u32, u32, u32)>,
     /// Whether the row cap stopped the read.
     pub truncated: bool,
+    /// The most rows read; set from the file's size.
+    pub row_cap: usize,
 }
 
 impl PdbLibrary {
@@ -100,7 +102,11 @@ pub(crate) fn read_pdb(bytes: &[u8]) -> Result<PdbLibrary, String> {
     }
     // A chain cannot hold more pages than the file does, and no page is read twice.
     let max_pages = bytes.len() / page_size + 1;
-    let mut library = PdbLibrary::default();
+    // A row takes at least 16 bytes of the file, so no more rows than that can be real.
+    let mut library = PdbLibrary {
+        row_cap: bytes.len() / 16,
+        ..PdbLibrary::default()
+    };
     let mut visited = HashSet::new();
     let mut kinds_read = HashSet::new();
     for t in 0..tables {
@@ -170,7 +176,7 @@ fn read_page(page: &[u8], kind: u32, library: &mut PdbLibrary) {
             if present & (1 << i) == 0 {
                 continue;
             }
-            if library.row_count() >= MAX_ROWS {
+            if library.row_count() >= library.row_cap {
                 library.truncated = true;
                 return;
             }
@@ -279,6 +285,9 @@ fn text(row: &[u8], at: usize) -> Option<String> {
     }
     // Long: flags, a 16-bit length counting these four bytes, a pad byte, then the text.
     let len = usize::from(le16(row, at + 1)?).checked_sub(4)?;
+    if len > MAX_STRING_BYTES {
+        return None;
+    }
     let body = row.get(at + 4..at.checked_add(4)?.checked_add(len)?)?;
     match flags {
         0x40 => Some(String::from_utf8_lossy(body).into_owned()),
@@ -313,6 +322,37 @@ mod tests {
         // A length running past the row is refused.
         assert_eq!(text(&[0x40, 200, 0, 0, b'h'], 0), None);
         assert_eq!(text(&[], 0), None);
+    }
+
+    #[test]
+    fn an_oversized_string_is_ignored() {
+        // A long ASCII string declaring 5000 bytes, all present, is over the cap.
+        let mut row = vec![0x40, 0x8c, 0x13, 0];
+        row.extend(vec![b'a'; 5000 - 4]);
+        assert_eq!(text(&row, 0), None);
+        // Just inside the cap it reads.
+        let mut ok = vec![0x40, 0x04, 0x10, 0];
+        ok.extend(vec![b'a'; 4096]);
+        assert_eq!(text(&ok, 0).map(|t| t.len()), Some(4096));
+    }
+
+    #[test]
+    fn the_row_cap_follows_the_file_size() {
+        let mut library = PdbLibrary {
+            row_cap: 2,
+            ..PdbLibrary::default()
+        };
+        let mut page = vec![0u8; 1024];
+        page[0x18] = 3;
+        let end = 1024 - 36;
+        page[end + 32..end + 34].copy_from_slice(&7u16.to_le_bytes());
+        for (i, off) in [0x100u16, 0x200, 0x300].iter().enumerate() {
+            let at = end + 32 - 2 * (i + 1);
+            page[at..at + 2].copy_from_slice(&off.to_le_bytes());
+        }
+        read_page(&page, PLAYLIST_ENTRIES, &mut library);
+        assert!(library.truncated);
+        assert_eq!(library.entries.len(), 2);
     }
 
     #[test]
