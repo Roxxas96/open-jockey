@@ -242,6 +242,22 @@ letter; an export now keeps VirtualDJ's letter. A re-export then no longer asked
 track was listed twice. Not verified: CDJ (not exported), another computer or Windows, Serato
 DJ Pro's saved loops.
 
+### Hands-on check (plan 11b: guest sticks)
+
+Owner, 2026-11-17 (macOS; the OJGUEST stick made with Serato DJ Lite, Rekordbox 7.2.19 and
+VirtualDJ): "Hands on test was a success." The stick showed its Serato, rekordbox, rekordbox
+(xml) and VirtualDJ branches with their playlists in order. Tracks from each branch loaded
+with their hotcues, colours and names, and the rekordbox and VirtualDJ loops played. A hotcue
+edit stayed until the stick was plugged in again, and the stick's files were unchanged. A
+playing guest deck kept playing after the stick was unplugged. The owner's library gained
+nothing.
+
+Known and left for a follow-up: a review measured Serato's MP3 positions 55.2 ms (2,435
+frames) after the decoded audio on the fixture's MP3s, while import and export shift by 1,152
+frames, so Serato MP3 cues sit about 29 ms late. rekordbox's `Inizio="0.024"` hints its MP3
+positions may be about 25 ms off too. Too small to see at normal zoom; the fix needs
+calibration MP3s analysed by Serato and rekordbox.
+
 ### Hands-on check (plan 12a: compact window)
 
 Owner, 2026-11-12 (macOS, the SB3). Partway through, the owner compared full-window renders
