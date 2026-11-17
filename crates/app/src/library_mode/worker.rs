@@ -524,7 +524,8 @@ fn run(
             }
             Job::AskDelete { seq, target, decks } => {
                 let loaded = loaded_files(&decks, &in_flight);
-                let answer = delete::ask(&target, &browser, &reader, &loaded, &own);
+                let guests: Vec<PathBuf> = sticks.sticks().into_iter().map(|s| s.root).collect();
+                let answer = delete::ask(&target, &browser, &reader, &loaded, &own, &guests);
                 let check = ui::DeleteCheck {
                     seq,
                     target,
@@ -535,12 +536,14 @@ fn run(
             Job::Delete { target, decks } => {
                 let loaded = loaded_files(&decks, &in_flight);
                 let writer = lib.writer();
+                let guests: Vec<PathBuf> = sticks.sticks().into_iter().map(|s| s.root).collect();
                 let deleter = Deleter {
                     reader: &reader,
                     writer: &writer,
                     browser: &browser,
                     trash,
                     own: &own,
+                    guests: &guests,
                 };
                 let done = deleter.delete(&target, &loaded);
                 // The library first, then the browser read again, then the event.

@@ -549,6 +549,21 @@ enum Resolved {
     Disk(Doomed),
 }
 
+/// Whether `doomed` holds a path on one of the guest sticks mounted at `guests`. Paths are
+/// compared canonicalised, so a link into a stick counts; a path that is not on disk is
+/// compared as given.
+fn on_guest_stick(doomed: &Doomed, guests: &[PathBuf]) -> bool {
+    let real = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let roots: Vec<PathBuf> = guests.iter().map(|root| real(root)).collect();
+    let paths = match doomed {
+        Doomed::Files(paths) => paths.as_slice(),
+        Doomed::Folder(path) => std::slice::from_ref(path),
+    };
+    paths
+        .iter()
+        .any(|path| roots.iter().any(|root| real(path).starts_with(root)))
+}
+
 /// Reads what `target` names. The window's whole-list selections must still be the
 /// browser's.
 fn resolve(target: &DeleteTarget, browser: &Browser, reader: &Reader) -> Result<Resolved, String> {
@@ -616,6 +631,7 @@ pub(super) fn ask(
     reader: &Reader,
     loaded: &[(DeckId, PathBuf)],
     own: &[PathBuf],
+    guests: &[PathBuf],
 ) -> Result<String, String> {
     match resolve(target, browser, reader)? {
         Resolved::Entries { name, entries, .. } => Ok(format!(
@@ -628,6 +644,9 @@ pub(super) fn ask(
             safe(name)
         )),
         Resolved::Disk(doomed) => {
+            if on_guest_stick(&doomed, guests) {
+                return Err(GUEST_UNCHANGED.to_owned());
+            }
             let folders = reader.folders().map_err(safe)?;
             check_delete(&doomed, &folders, loaded, own)
                 .map(|plan| plan.question())
@@ -652,6 +671,8 @@ pub(super) struct Deleter<'a> {
     pub browser: &'a Browser,
     pub trash: &'a dyn Trash,
     pub own: &'a [PathBuf],
+    /// The mount paths of the guest sticks plugged in.
+    pub guests: &'a [PathBuf],
 }
 
 impl Deleter<'_> {
@@ -671,6 +692,9 @@ impl Deleter<'_> {
             } => playlist_edits::remove(playlist, &entries),
             Resolved::Playlist { id, .. } => WriteOp::DeletePlaylist(id),
             Resolved::Disk(doomed) => {
+                if on_guest_stick(&doomed, self.guests) {
+                    return refused(GUEST_UNCHANGED.to_owned());
+                }
                 let folders = match self.reader.folders() {
                     Ok(folders) => folders,
                     Err(e) => return refused(format!("warning: {}", safe(e))),
@@ -1064,7 +1088,7 @@ mod tests {
         ];
         browser.edit(BrowserEdit::SelectAll).unwrap();
         for target in what {
-            let refused = ask(&target, &browser, &reader, &[], &own);
+            let refused = ask(&target, &browser, &reader, &[], &own, &[]);
             assert_eq!(refused, Err("A guest stick is never changed".to_owned()));
             let deleter = Deleter {
                 reader: &reader,
@@ -1072,6 +1096,47 @@ mod tests {
                 browser: &browser,
                 trash: &trash,
                 own: &own,
+                guests: &[],
+            };
+            let done = deleter.delete(&target, &[]);
+            assert!(!done.refresh);
+            assert_eq!(done.messages, ["A guest stick is never changed"]);
+        }
+        assert!(root.join("a.wav").exists());
+        assert!(trash.moved().is_empty());
+    }
+
+    /// The stick's "Files" child is a plain folder list: a delete from it is refused all
+    /// the same, before anything reaches the Trash.
+    #[test]
+    fn delete_from_a_guest_sticks_folder_list_changes_nothing() {
+        let stick = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(stick.path()).unwrap();
+        std::fs::copy(FIXTURE, root.join("a.wav")).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let lib = Library::open(&data.path().join("library.sqlite3")).unwrap();
+        let browser = Browser::with_roots(lib.reader().unwrap(), Vec::new).unwrap();
+        let reader = lib.reader().unwrap();
+        let writer = lib.writer();
+        let trash = FakeTrash::new(&data.path().join("bin"));
+        let own = Vec::new();
+        let guests = vec![root.clone()];
+        let what = [
+            DeleteTarget::Files {
+                paths: vec![root.join("a.wav")],
+            },
+            DeleteTarget::Folder { path: root.clone() },
+        ];
+        for target in what {
+            let refused = ask(&target, &browser, &reader, &[], &own, &guests);
+            assert_eq!(refused, Err("A guest stick is never changed".to_owned()));
+            let deleter = Deleter {
+                reader: &reader,
+                writer: &writer,
+                browser: &browser,
+                trash: &trash,
+                own: &own,
+                guests: &guests,
             };
             let done = deleter.delete(&target, &[]);
             assert!(!done.refresh);
