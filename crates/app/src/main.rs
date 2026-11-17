@@ -4,6 +4,7 @@ mod config;
 mod console;
 mod covers;
 mod format;
+mod guest;
 mod led_scan;
 mod legacy_dirs;
 mod library_cmd;

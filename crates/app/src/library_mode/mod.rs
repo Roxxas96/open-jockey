@@ -12,6 +12,7 @@ mod delete;
 mod memory_sync;
 mod playlist_edits;
 mod stem_jobs;
+mod stick_watch;
 mod worker;
 
 use std::cell::RefCell;
@@ -37,6 +38,7 @@ use library::{
 
 use crate::console::ConsoleCommand;
 use crate::format::{bpm_text, grid_text, key_text, notation_from_setting, safe, track_name};
+use crate::guest::GuestSticks;
 use crate::printer::Printer;
 use crate::session::jobs::{AnalysisFacts, Pace, StemsFacts, analysis_job, scan_job, stems_job};
 pub use delete::{SystemTrash, Trash};
@@ -104,6 +106,10 @@ enum DeckStems {
 
 pub struct LibraryMode {
     lib: Arc<Library>,
+    /// The guest sticks plugged in, found and read by the library worker; this side only
+    /// copies from it.
+    #[allow(dead_code, reason = "the browser rows and loads of tasks 7 and 8")]
+    sticks: Arc<GuestSticks>,
     writer: Writer,
     analyzer: Option<Analyzer>,
     /// Tracks queued for analysis since the start, with their file as it was then. A
@@ -259,8 +265,15 @@ impl LibraryMode {
         };
 
         let (events_tx, events) = channel();
-        let (jobs, worker) = worker::spawn(Arc::clone(&lib), events_tx, drives, trash)
-            .context("starting the library worker")?;
+        let sticks = Arc::new(GuestSticks::default());
+        let (jobs, worker) = worker::spawn(
+            Arc::clone(&lib),
+            events_tx,
+            drives,
+            trash,
+            Arc::clone(&sticks),
+        )
+        .context("starting the library worker")?;
         let stems = stems
             .map(|setup| StemsControl::start(Arc::clone(&lib), setup))
             .transpose()
@@ -269,6 +282,7 @@ impl LibraryMode {
         let mut mode = Self {
             writer: lib.writer(),
             lib,
+            sticks,
             analyzer: Some(analyzer),
             enqueued: HashMap::new(),
             queued_total: 0,
