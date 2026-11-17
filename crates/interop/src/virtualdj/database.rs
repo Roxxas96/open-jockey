@@ -183,3 +183,28 @@ fn read_poi(e: &BytesStart) -> Option<VdjPoi> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_drive_path_under_a_drive_root_stays_under_it() {
+        let root = Path::new("stick");
+        // VirtualDJ's `X:/` is the drive's own root, whichever separator follows it.
+        for raw in [
+            r"C:\Users\me\outside.wav",
+            "C:/Users/me/outside.wav",
+            "e:outside.wav",
+        ] {
+            let path = map_path(raw, Some(root));
+            assert!(path.starts_with(root), "{raw}: {}", path.display());
+            assert!(path.is_relative(), "{raw}: {}", path.display());
+        }
+        // Without a drive root (a computer's own database), the path is kept as written.
+        assert_eq!(
+            map_path(r"C:\Users\me\a.wav", None),
+            PathBuf::from(r"C:\Users\me\a.wav")
+        );
+    }
+}
