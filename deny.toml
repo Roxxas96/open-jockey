@@ -40,6 +40,9 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "unmaintained zvariant in accesskit's Linux backend; no vulnerability" },
   { id = "RUSTSEC-2026-0371", reason = "unmaintained zbus_names in accesskit's Linux backend; no vulnerability" },
   { id = "RUSTSEC-2026-0372", reason = "unmaintained zvariant_derive in accesskit's Linux backend; no vulnerability" },
+  # `chrono` is unmaintained (not vulnerable): `trash` 5.3.0, the latest release, uses it to
+  # write the freedesktop DeletionDate on Linux. Drop this once trash moves off it.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono in trash's Linux backend; no vulnerability" },
 ]
 
 [bans]
