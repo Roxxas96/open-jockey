@@ -1575,6 +1575,20 @@ mod tests {
     }
 
     #[test]
+    fn a_guest_track_cover_is_never_looked_up_or_removed() {
+        let mut decks = labelled();
+        for step in [
+            ui::LibraryStep::FindCover { track: -4 },
+            ui::LibraryStep::RemoveCover { track: -4 },
+        ] {
+            assert_eq!(
+                events_of(&mut decks, step),
+                ["A guest track's cover is not changed"]
+            );
+        }
+    }
+
+    #[test]
     fn creating_a_playlist_writes_it_and_selects_it() {
         let mut decks = labelled();
         let step = ui::LibraryStep::CreatePlaylist {

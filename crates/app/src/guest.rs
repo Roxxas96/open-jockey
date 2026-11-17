@@ -149,6 +149,11 @@ impl GuestSticks {
         self.lock().tracks.get(&id).cloned()
     }
 
+    /// Whether guest track `id`'s stick is plugged in.
+    pub fn is_plugged(&self, id: i64) -> bool {
+        self.lock().tracks.contains_key(&id)
+    }
+
     /// Keeps `memory` as the session's hotcues of guest track `id`; it dies with the stick.
     /// An id that is not a track of a plugged-in stick is ignored.
     pub fn set_hotcues(&self, id: i64, memory: TrackMemory) {

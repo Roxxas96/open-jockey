@@ -115,6 +115,9 @@ pub struct LibraryMode {
     sticks: Arc<GuestSticks>,
     /// The sticks' [`GuestSticks::generation`] when the decks last looked for a removed one.
     sticks_seen: u64,
+    /// Guest grids edited in memory and not on every deck holding their track yet (the
+    /// engine queue was full).
+    guest_grids: HashMap<i64, library::Beatgrid>,
     writer: Writer,
     analyzer: Option<Analyzer>,
     /// Tracks queued for analysis since the start, with their file as it was then. A
@@ -289,6 +292,7 @@ impl LibraryMode {
             lib,
             sticks,
             sticks_seen: 0,
+            guest_grids: HashMap::new(),
             analyzer: Some(analyzer),
             enqueued: HashMap::new(),
             queued_total: 0,
@@ -694,6 +698,9 @@ impl LibraryMode {
         }
         self.sync_cues(engine, printer);
         self.note_removed_sticks();
+        if !self.guest_grids.is_empty() {
+            self.send_guest_grids(engine);
+        }
         let playing = DeckId::ALL.into_iter().any(|d| engine.deck(d).playing);
         self.set_playing(playing);
         self.poll_stems(playing, engine, printer);
@@ -760,10 +767,14 @@ impl LibraryMode {
                 {
                     t.row.bpm = grid.bpm;
                 }
-                self.sync_grid(track, Some(&grid), engine);
                 if GuestSticks::is_guest(track) {
-                    self.keep_guest_grid(track);
+                    // No refresh would send it again: it waits here until it reaches every
+                    // deck holding the track.
+                    self.keep_guest_grid(track, &grid);
+                    self.guest_grids.insert(track, grid);
+                    self.send_guest_grids(engine);
                 } else {
+                    self.sync_grid(track, Some(&grid), engine);
                     self.refresh_wanted = true;
                 }
             }
@@ -880,7 +891,7 @@ impl LibraryMode {
             marks: Arc::new(guest.marks),
             gone: false,
         });
-        let incoming = DeckTrack {
+        let mut incoming = DeckTrack {
             row: loaded.row,
             path: loaded.path,
             load_seq: after + 1,
@@ -892,6 +903,10 @@ impl LibraryMode {
             stems: DeckStems::Unrequested,
             guest,
         };
+        // Its stick may have gone while it decoded, after the last look for removed ones.
+        if incoming.guest.is_some() && !self.sticks.is_plugged(incoming.row.id) {
+            mark_stick_gone(&mut incoming);
+        }
         // The outgoing track's changes keep being saved until the engine applies this load.
         // A track whose own load never showed had none: the earlier outgoing track then
         // stays, until the load that replaced it shows.
@@ -1110,20 +1125,34 @@ impl LibraryMode {
         self.dirty = true;
     }
 
-    /// Keeps the grid of guest track `track`, as its decks have it now, for the session.
-    fn keep_guest_grid(&mut self, track: i64) {
-        let Some((loaded, grid)) = self
+    /// Keeps `grid` as guest track `track`'s grid for the session.
+    fn keep_guest_grid(&mut self, track: i64, grid: &library::Beatgrid) {
+        let Some((loaded, rate)) = self
             .decks
             .iter()
             .flatten()
             .find(|t| t.row.id == track)
-            .and_then(|t| Some((t.guest.as_ref()?.loaded, t.grid)))
+            .and_then(|t| Some((t.guest.as_ref()?.loaded, t.memory.rate())))
         else {
             return;
         };
         let mut memory = self.sticks.hotcues(track).unwrap_or(loaded);
-        memory.grid = grid;
+        memory.grid = engine_grid(Some(grid), rate);
         self.sticks.set_hotcues(track, memory);
+    }
+
+    /// Sends the guest grids edited in memory to the decks holding their track; one the
+    /// engine queue had no room for is sent again at the next round.
+    fn send_guest_grids(&mut self, engine: &mut EngineController) {
+        let pending: Vec<(i64, library::Beatgrid)> =
+            self.guest_grids.iter().map(|(&t, &g)| (t, g)).collect();
+        for (track, grid) in pending {
+            self.sync_grid(track, Some(&grid), engine);
+            let mut holding = self.decks.iter().flatten().filter(|t| t.row.id == track);
+            if holding.all(|t| t.grid == engine_grid(Some(&grid), t.memory.rate())) {
+                self.guest_grids.remove(&track);
+            }
+        }
     }
 
     /// Marks the guest decks whose stick was removed: they play on what was decoded, and
@@ -1135,13 +1164,8 @@ impl LibraryMode {
         }
         self.sticks_seen = generation;
         for t in self.decks.iter_mut().flatten() {
-            let Some(guest) = t.guest.as_mut().filter(|g| !g.gone) else {
-                continue;
-            };
-            if self.sticks.track(t.row.id).is_none() {
-                guest.gone = true;
-                let title = t.row.title.as_deref().unwrap_or("(untitled)");
-                t.row.title = Some(format!("{title} (stick removed)"));
+            if !self.sticks.is_plugged(t.row.id) {
+                mark_stick_gone(t);
                 self.dirty = true;
             }
         }
@@ -1898,6 +1922,17 @@ enum Spot {
 
 /// What a cue or hotcue write stores: the frames bits and the loop length bits, if any.
 type Stored = (u64, Option<u64>);
+
+/// Marks `track`, a guest track's deck, as playing on though its stick was removed: its
+/// title says so. Nothing for a library track, or one marked already.
+fn mark_stick_gone(track: &mut DeckTrack) {
+    let Some(guest) = track.guest.as_mut().filter(|g| !g.gone) else {
+        return;
+    };
+    guest.gone = true;
+    let title = track.row.title.as_deref().unwrap_or("(untitled)");
+    track.row.title = Some(format!("{title} (stick removed)"));
+}
 
 /// The refusal of a cover change for a guest track: its cover is never looked up or kept.
 ///

@@ -52,7 +52,9 @@ pub(super) fn guest_memory(
         }
     }
     for cue in &track.hotcues {
+        // A pad the deck does not have is dropped like a cue past the end.
         let Some(slot) = memory.hotcues.get_mut(usize::from(cue.slot)) else {
+            dropped += 1;
             continue;
         };
         let frames = cue.seconds * rate;
@@ -226,13 +228,15 @@ mod tests {
                 cue(2, 10.0, None),
                 cue(3, 9.0, Some(2.0)),
                 cue(4, 9.0, Some(1.0)),
+                // A pad the deck does not have.
+                cue(9, 2.0, None),
             ],
         };
         // 10 s at 1 kHz.
         let (memory, dropped) = guest_memory(&track, 1000, 10_000);
         assert_eq!(
-            dropped, 4,
-            "the main cue, slots 1, 2 and the loop of slot 3"
+            dropped, 5,
+            "the main cue, slots 1, 2, the loop of slot 3 and slot 9"
         );
         assert_eq!(memory.cue, 0.0);
         assert_eq!(memory.hotcues[0], Some(Hotcue::point(1000.0)));
@@ -655,5 +659,133 @@ mod tests {
         assert!((bpm - 120.0).abs() < 0.5, "{bpm}");
         assert_library_untouched(&rig.mode);
         no_warnings(&rig.events);
+    }
+
+    #[test]
+    fn a_guest_load_landing_after_its_stick_went_says_so() {
+        let mut rig = rig(None);
+        let id = vdj_id(&rig.mode.sticks, "OJ Click 120");
+        let track = rig.mode.sticks.track(id).unwrap();
+        // Pulled while the track decodes: the control loop sees it before the load lands.
+        rig.mode.sticks.remove(&rig.root);
+        run_until(&mut rig, |_, _| true);
+        let seq = rig.mode.next_seq(deck(0));
+        let loaded = super::super::worker::Loaded {
+            deck: deck(0),
+            seq,
+            row: track.row,
+            path: track.path,
+            buffer: Arc::new(engine::TrackBuffer::new(44_100, vec![0.0; 2 * 4410]).unwrap()),
+            memory: TrackMemory::default(),
+            hotcues_read: true,
+            refuse_if_playing: false,
+            guest: Some(super::super::worker::GuestLoaded {
+                marks: Default::default(),
+                dropped: 0,
+            }),
+        };
+        rig.mode.load(loaded, &mut rig.engine, &rig.printer);
+        run_until(&mut rig, |_, _| true);
+        let title = rig.mode.decks[0].as_ref().unwrap().row.title.clone();
+        assert_eq!(title.as_deref(), Some("OJ Click 120 (stick removed)"));
+    }
+
+    /// Asks for `edits` on deck 1 in one round, then waits until its grid is `expected`
+    /// (period, first beat, from the rate), within a frame.
+    fn edit_grid(rig: &mut Rig, edits: &[GridEditRequest], expected: impl Fn(f64) -> (f64, f64)) {
+        let rate = f64::from(rig.engine.deck(deck(0)).track_sample_rate);
+        for &edit in edits {
+            rig.mode.handle_request(
+                actions::AppRequest::Grid {
+                    deck: deck(0),
+                    edit,
+                },
+                &rig.engine,
+                &rig.printer,
+            );
+        }
+        let (period, first) = expected(rate);
+        let close = |g: Option<engine::Grid>| {
+            g.is_some_and(|g| {
+                (g.beat_period_frames - period).abs() < 1.0
+                    && (g.first_beat_frames - first).abs() < 1.0
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            run_until(rig, |_, _| true);
+            if close(rig.engine.deck(deck(0)).grid) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grid {:?}, wanted period {period} first {first}",
+                rig.engine.deck(deck(0)).grid
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn guest_grid_edits_in_a_row_all_apply_in_order() {
+        let mut rig = rig(None);
+        let id = vdj_id(&rig.mode.sticks, "OJ Click 120");
+        load(&mut rig, 0, id);
+        let shift = GridEditRequest::Shift { millis: 10 };
+        // Two shifts: 20 ms.
+        edit_grid(&mut rig, &[shift, shift], |r| (60.0 * r / 120.0, 0.02 * r));
+        // Double then shift: the doubled grid, shifted.
+        edit_grid(&mut rig, &[GridEditRequest::Double, shift], |r| {
+            let period = 60.0 * r / 240.0;
+            ((period), (0.03 * r).rem_euclid(period))
+        });
+        let kept = rig.mode.sticks.hotcues(id).unwrap().grid;
+        assert_eq!(kept, rig.engine.deck(deck(0)).grid);
+    }
+
+    #[test]
+    fn a_guest_grid_edit_waits_for_room_in_a_full_engine_queue() {
+        let mut rig = rig(None);
+        let id = vdj_id(&rig.mode.sticks, "OJ Click 120");
+        load(&mut rig, 0, id);
+        let rate = f64::from(rig.engine.deck(deck(0)).track_sample_rate);
+        while rig
+            .engine
+            .send(Command::Deck(deck(0), DeckCommand::Pause))
+            .is_ok()
+        {}
+        rig.mode.handle_request(
+            actions::AppRequest::Grid {
+                deck: deck(0),
+                edit: GridEditRequest::Shift { millis: 10 },
+            },
+            &rig.engine,
+            &rig.printer,
+        );
+        // Not rendered: the queue stays full while the edit comes back.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let events = Arc::clone(&rig.events);
+        while !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.starts_with("Deck 1 grid:"))
+        {
+            assert!(Instant::now() < deadline, "no grid event");
+            rig.mode.poll(Instant::now(), &mut rig.engine, &rig.printer);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Kept for the session at once, and on the deck once there is room.
+        let kept = rig.mode.sticks.hotcues(id).and_then(|m| m.grid);
+        assert!(
+            kept.is_some_and(|g| (g.first_beat_frames - 0.01 * rate).abs() < 1.0),
+            "{kept:?}"
+        );
+        run_until(&mut rig, |_, engine| {
+            engine
+                .deck(deck(0))
+                .grid
+                .is_some_and(|g| (g.first_beat_frames - 0.01 * rate).abs() < 1.0)
+        });
     }
 }
