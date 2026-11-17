@@ -89,12 +89,16 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
     // Open `<NODE>`s of the playlist tree: a name for a folder, and whether it is a playlist.
     let mut nodes: Vec<(String, bool)> = Vec::new();
     let mut open_playlist: Option<GuestPlaylist> = None;
+    let mut depth = 0usize;
     loop {
         let event = reader
             .read_event_into(&mut buf)
             .map_err(|e| format!("at byte {}: {e}", reader.error_position()))?;
         let (e, closes) = match &event {
-            Event::Start(e) => (Some(e), false),
+            Event::Start(e) => {
+                depth += 1;
+                (Some(e), false)
+            }
             Event::Empty(e) => (Some(e), true),
             _ => (None, false),
         };
@@ -132,6 +136,8 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
                     let name = attr(e, "Name").unwrap_or_default();
                     let is_list = attr(e, "Type").as_deref() == Some("1");
                     if is_list {
+                        // A playlist inside a playlist: the outer one is complete as read.
+                        source.playlists.extend(open_playlist.take());
                         open_playlist = Some(GuestPlaylist {
                             name: flatten(&nodes, &name),
                             tracks: Vec::new(),
@@ -152,6 +158,7 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
                 _ => {}
             }
         } else if let Event::End(e) = &event {
+            depth = depth.saturating_sub(1);
             match e.name().as_ref() {
                 "COLLECTION" => in_collection = false,
                 "PLAYLISTS" => in_playlists = false,
@@ -167,6 +174,9 @@ fn parse(bytes: &[u8], locator: &mut Locator, source: &mut GuestSource) -> Resul
                 _ => {}
             }
         } else if matches!(event, Event::Eof) {
+            if depth > 0 {
+                return Err("the file is truncated".into());
+            }
             break;
         }
         buf.clear();
@@ -212,7 +222,10 @@ fn mark(e: &BytesStart<'_>, t: &mut Pending) {
     #[allow(clippy::cast_possible_truncation)]
     let num = num as i32;
     if num == -1 {
-        t.main_cue = t.main_cue.or(Some(start));
+        // Only a plain memory cue; fades, load markers and memory loops are not cues.
+        if attr(e, "Type").as_deref() == Some("0") {
+            t.main_cue = t.main_cue.or(Some(start));
+        }
         return;
     }
     if !(0..SLOTS).contains(&num) {
@@ -283,6 +296,9 @@ struct Locator {
     outside: usize,
     missing: usize,
     ambiguous: usize,
+    /// Whether the by-name walk stopped at its file cap.
+    capped: bool,
+    limit: usize,
 }
 
 impl Locator {
@@ -294,6 +310,8 @@ impl Locator {
             outside: 0,
             missing: 0,
             ambiguous: 0,
+            capped: false,
+            limit: SEARCH_LIMIT,
         }
     }
 
@@ -326,6 +344,9 @@ impl Locator {
                 self.ambiguous,
                 plural(self.ambiguous, "track name matches", "track names match")
             ));
+        }
+        if self.capped {
+            out.push("this stick was too large to search fully for tracks by name".into());
         }
         out
     }
@@ -365,18 +386,8 @@ impl Locator {
         }
         let name = OsString::from(parts.last()?);
         let found = self.index().get(&name).cloned().unwrap_or_default();
-        let best = found
-            .iter()
-            .min_by_key(|p| {
-                let rel = p.strip_prefix(&self.root).unwrap_or(p);
-                let in_contents = rel
-                    .components()
-                    .next()
-                    .is_some_and(|c| c.as_os_str() == "Contents");
-                (!in_contents, rel.components().count())
-            })
-            .cloned();
-        if found.len() > 1 {
+        let (best, decisive) = choose(&self.root, found);
+        if !decisive {
             self.ambiguous += 1;
         }
         let path = best.and_then(|p| on_stick(&self.root, &p));
@@ -387,25 +398,34 @@ impl Locator {
     }
 
     fn index(&mut self) -> &HashMap<OsString, Vec<PathBuf>> {
-        let root = &self.root;
+        let (root, limit) = (&self.root, self.limit);
+        let capped = &mut self.capped;
         self.by_name.get_or_insert_with(|| {
             let mut map = HashMap::new();
             let mut seen = 0;
-            walk(root, 0, &mut seen, &mut map);
+            *capped = !walk(root, 0, (&mut seen, limit), &mut map);
             map
         })
     }
 }
 
 /// Indexes the files under `dir` by name: no hidden folders, no links, a bounded depth.
-fn walk(dir: &Path, depth: usize, seen: &mut usize, map: &mut HashMap<OsString, Vec<PathBuf>>) {
+/// `budget` is the files seen so far and the most to remember; returns `false` when the walk
+/// stopped at that cap.
+fn walk(
+    dir: &Path,
+    depth: usize,
+    budget: (&mut usize, usize),
+    map: &mut HashMap<OsString, Vec<PathBuf>>,
+) -> bool {
+    let (seen, limit) = budget;
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return true;
     };
     let mut subdirs = Vec::new();
     for entry in entries.flatten() {
-        if *seen >= SEARCH_LIMIT {
-            return;
+        if *seen >= limit {
+            return false;
         }
         let Ok(kind) = entry.file_type() else {
             continue;
@@ -422,8 +442,27 @@ fn walk(dir: &Path, depth: usize, seen: &mut usize, map: &mut HashMap<OsString, 
     }
     subdirs.sort();
     for sub in subdirs {
-        walk(&sub, depth + 1, seen, map);
+        if !walk(&sub, depth + 1, (&mut *seen, limit), map) {
+            return false;
+        }
     }
+    true
+}
+
+/// The best of the files sharing a name, and whether the choice was decisive: files under
+/// `Contents/` win, then the shortest path; a tie is broken by path order and not decisive.
+fn choose(root: &Path, mut found: Vec<PathBuf>) -> (Option<PathBuf>, bool) {
+    let rank = |p: &PathBuf| {
+        let rel = p.strip_prefix(root).unwrap_or(p);
+        let in_contents = rel
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == "Contents");
+        (!in_contents, rel.components().count())
+    };
+    found.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    let decisive = found.len() < 2 || rank(&found[0]) != rank(&found[1]);
+    (found.into_iter().next(), decisive)
 }
 
 /// The path components of a `file://` location, percent-decoded, without a host or drive.
@@ -447,4 +486,21 @@ fn parts_of(location: &str) -> Vec<String> {
         parts.remove(0);
     }
     parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_name_search_stops_at_its_cap_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..5 {
+            std::fs::write(dir.path().join(format!("{n}.mp3")), b"x").unwrap();
+        }
+        let mut locator = Locator::new(dir.path());
+        locator.limit = 3;
+        assert_eq!(locator.find("file://localhost/Elsewhere/none.mp3"), None);
+        assert!(locator.problems().iter().any(|p| p.contains("too large")));
+    }
 }
