@@ -226,3 +226,87 @@ fn a_page_cycle_in_export_pdb_terminates() {
     let read = read_stick(stick.path(), "COPY");
     let _ = source_of(&read, GuestApp::RekordboxDevice);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_track_outside_the_stick_is_refused_and_counted() {
+    let (stick, _) = device_copy();
+    let outside = tempfile::tempdir().unwrap();
+    let track = stick
+        .path()
+        .join("Contents")
+        .join("Open Jockey Fixture")
+        .join("OJ Fixtures")
+        .join("OJ Click 126.mp3");
+    let elsewhere = outside.path().join("OJ Click 126.mp3");
+    fs::copy(&track, &elsewhere).unwrap();
+    fs::remove_file(&track).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &track).unwrap();
+    let read = read_stick(stick.path(), "COPY");
+    let source = source_of(&read, GuestApp::RekordboxDevice);
+    assert_eq!(source.tracks.len(), 2);
+    let problem = source.problem.as_deref().expect("a problem is reported");
+    assert!(problem.contains("outside this stick"), "{problem}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_ext_is_refused_and_counted() {
+    let (stick, _) = device_copy();
+    let outside = tempfile::tempdir().unwrap();
+    let ext = stick
+        .path()
+        .join("PIONEER")
+        .join("USBANLZ")
+        .join("P030")
+        .join("00006630")
+        .join("ANLZ0000.EXT");
+    let elsewhere = outside.path().join("ANLZ0000.EXT");
+    fs::copy(&ext, &elsewhere).unwrap();
+    fs::remove_file(&ext).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &ext).unwrap();
+    let read = read_stick(stick.path(), "COPY");
+    let source = source_of(&read, GuestApp::RekordboxDevice);
+    let problem = source.problem.as_deref().expect("a problem is reported");
+    assert!(problem.contains("outside this stick"), "{problem}");
+}
+
+#[test]
+fn a_crafted_pdb_with_repeated_tables_and_rows_stays_bounded() {
+    let (stick, pdb) = device_copy();
+    let mut bytes = fs::read(&pdb).unwrap();
+    let le = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    let page_size = le(&bytes, 4) as usize;
+    let tables = le(&bytes, 8) as usize;
+    let entry = |t: usize| 28 + 16 * t;
+    let tracks = (0..tables).find(|&t| le(&bytes, entry(t)) == 0).unwrap();
+    // Another table kind (not read) becomes a second copy of the tracks table.
+    let spare = (0..tables)
+        .find(|&t| ![0, 2, 3, 7, 8].contains(&le(&bytes, entry(t))))
+        .unwrap();
+    let copy: Vec<u8> = bytes[entry(tracks)..entry(tracks) + 16].to_vec();
+    bytes[entry(spare)..entry(spare) + 16].copy_from_slice(&copy);
+    // On the tracks page that holds rows, every offset of the group points at one row, and
+    // every row is flagged present.
+    let mut index = le(&bytes, entry(tracks) + 8) as usize;
+    loop {
+        let page = index * page_size;
+        if bytes[page + 0x18] > 0 {
+            let end = page + page_size - 36 + 36;
+            let first = [bytes[end - 6], bytes[end - 5]];
+            for i in 0..16 {
+                let at = end - 4 - 2 * (i + 1);
+                bytes[at..at + 2].copy_from_slice(&first);
+            }
+            bytes[end - 4..end - 2].copy_from_slice(&0xffffu16.to_le_bytes());
+            break;
+        }
+        index = le(&bytes, page + 12) as usize;
+    }
+    fs::write(&pdb, bytes).unwrap();
+    let started = std::time::Instant::now();
+    let read = read_stick(stick.path(), "COPY");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let source = source_of(&read, GuestApp::RekordboxDevice);
+    assert!(source.tracks.len() <= 3, "{} tracks", source.tracks.len());
+}
