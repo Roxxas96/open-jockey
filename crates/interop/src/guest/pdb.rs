@@ -21,6 +21,10 @@ const GROUP_BYTES: usize = 36;
 const MAX_TABLES: usize = 64;
 /// The longest string read; a row declaring more has that string treated as absent.
 const MAX_STRING_BYTES: usize = 4096;
+/// The most string bytes copied from one file, whatever its rows say.
+const STRING_BUDGET: usize = 32 * 1024 * 1024;
+/// The most rows read from one file.
+const MAX_ROWS: usize = 1_000_000;
 /// The smallest and largest page size accepted.
 const PAGE_SIZE_RANGE: std::ops::RangeInclusive<usize> = 512..=1 << 20;
 
@@ -66,6 +70,9 @@ pub(crate) struct PdbLibrary {
     pub truncated: bool,
     /// The most rows read; set from the file's size.
     pub row_cap: usize,
+    /// String bytes copied so far, and the most to copy.
+    pub string_bytes: usize,
+    pub string_budget: usize,
 }
 
 impl PdbLibrary {
@@ -104,7 +111,8 @@ pub(crate) fn read_pdb(bytes: &[u8]) -> Result<PdbLibrary, String> {
     let max_pages = bytes.len() / page_size + 1;
     // A row takes at least 16 bytes of the file, so no more rows than that can be real.
     let mut library = PdbLibrary {
-        row_cap: bytes.len() / 16,
+        row_cap: (bytes.len() / 16).min(MAX_ROWS),
+        string_budget: STRING_BUDGET,
         ..PdbLibrary::default()
     };
     let mut visited = HashSet::new();
@@ -176,7 +184,9 @@ fn read_page(page: &[u8], kind: u32, library: &mut PdbLibrary) {
             if present & (1 << i) == 0 {
                 continue;
             }
-            if library.row_count() >= library.row_cap {
+            if library.row_count() >= library.row_cap
+                || library.string_bytes >= library.string_budget
+            {
                 library.truncated = true;
                 return;
             }
@@ -191,13 +201,14 @@ fn read_page(page: &[u8], kind: u32, library: &mut PdbLibrary) {
                 continue;
             };
             if let Some(row) = page.get(start..) {
-                add_row(row, kind, library);
+                library.string_bytes += add_row(row, kind, library);
             }
         }
     }
 }
 
-fn add_row(row: &[u8], kind: u32, library: &mut PdbLibrary) {
+/// Adds one row; returns the string bytes it copied.
+fn add_row(row: &[u8], kind: u32, library: &mut PdbLibrary) -> usize {
     match kind {
         TRACKS => {
             // The string offsets start at 0x5e: analyze path 14th, title 17th, file path 20th.
@@ -208,9 +219,9 @@ fn add_row(row: &[u8], kind: u32, library: &mut PdbLibrary) {
                 le32(row, 0x44),
                 le32(row, 0x48),
             ) else {
-                return;
+                return 0;
             };
-            library.tracks.push(TrackRow {
+            let row = TrackRow {
                 id,
                 title: string(17).unwrap_or_default(),
                 artist_id,
@@ -218,50 +229,62 @@ fn add_row(row: &[u8], kind: u32, library: &mut PdbLibrary) {
                 tempo,
                 file_path: string(20).unwrap_or_default(),
                 analyze_path: string(14).unwrap_or_default(),
-            });
+            };
+            let bytes = row.title.len() + row.file_path.len() + row.analyze_path.len();
+            library.tracks.push(row);
+            bytes
         }
         ARTISTS => {
             // The name is a byte offset at 9, or a 16-bit one at 10 when the subtype is 0x64.
             let (Some(subtype), Some(id)) = (le16(row, 0), le32(row, 4)) else {
-                return;
+                return 0;
             };
             let at = if subtype == 0x64 {
                 le16(row, 10).map(usize::from)
             } else {
                 row.get(9).map(|&b| usize::from(b))
             };
-            if let Some(name) = at.and_then(|at| text(row, at)) {
+            let name = at.and_then(|at| text(row, at)).unwrap_or_default();
+            let bytes = name.len();
+            if !name.is_empty() {
                 library.artists.insert(id, name);
             }
+            bytes
         }
         ALBUMS => {
             // Like an artist: a byte offset at 0x15, or a 16-bit one at 0x16 when the subtype
             // is 0x84.
             let (Some(subtype), Some(id)) = (le16(row, 0), le32(row, 12)) else {
-                return;
+                return 0;
             };
             let at = if subtype == 0x84 {
                 le16(row, 0x16).map(usize::from)
             } else {
                 row.get(0x15).map(|&b| usize::from(b))
             };
-            if let Some(name) = at.and_then(|at| text(row, at)) {
+            let name = at.and_then(|at| text(row, at)).unwrap_or_default();
+            let bytes = name.len();
+            if !name.is_empty() {
                 library.albums.insert(id, name);
             }
+            bytes
         }
         PLAYLIST_TREE => {
             let (Some(parent), Some(sort_order), Some(id), Some(folder)) =
                 (le32(row, 0), le32(row, 8), le32(row, 12), le32(row, 16))
             else {
-                return;
+                return 0;
             };
+            let name = text(row, 0x14).unwrap_or_default();
+            let bytes = name.len();
             library.nodes.push(NodeRow {
                 id,
                 parent,
                 sort_order,
-                name: text(row, 0x14).unwrap_or_default(),
+                name,
                 is_playlist: folder == 0,
             });
+            bytes
         }
         PLAYLIST_ENTRIES => {
             if let (Some(index), Some(track), Some(list)) =
@@ -269,8 +292,9 @@ fn add_row(row: &[u8], kind: u32, library: &mut PdbLibrary) {
             {
                 library.entries.push((list, index, track));
             }
+            0
         }
-        _ => {}
+        _ => 0,
     }
 }
 
@@ -340,6 +364,7 @@ mod tests {
     fn the_row_cap_follows_the_file_size() {
         let mut library = PdbLibrary {
             row_cap: 2,
+            string_budget: usize::MAX,
             ..PdbLibrary::default()
         };
         let mut page = vec![0u8; 1024];
@@ -353,6 +378,30 @@ mod tests {
         read_page(&page, PLAYLIST_ENTRIES, &mut library);
         assert!(library.truncated);
         assert_eq!(library.entries.len(), 2);
+    }
+
+    #[test]
+    fn the_string_budget_stops_a_crafted_pdb() {
+        // Three playlist-tree rows, each with the 4-byte name "abcd"; a budget of 6 bytes
+        // admits the first two (the check comes before a row) and stops the third.
+        let mut library = PdbLibrary {
+            row_cap: 100,
+            string_budget: 6,
+            ..PdbLibrary::default()
+        };
+        let mut page = vec![0u8; 1024];
+        page[0x18] = 3;
+        let end = 1024 - 36;
+        page[end + 32..end + 34].copy_from_slice(&7u16.to_le_bytes());
+        for (i, off) in [0x100u16, 0x200, 0x300].iter().enumerate() {
+            let at = end + 32 - 2 * (i + 1);
+            page[at..at + 2].copy_from_slice(&off.to_le_bytes());
+            let row = PAGE_HEADER_BYTES + usize::from(*off);
+            page[row + 0x14..row + 0x19].copy_from_slice(&[0x0b, b'a', b'b', b'c', b'd']);
+        }
+        read_page(&page, PLAYLIST_TREE, &mut library);
+        assert!(library.truncated);
+        assert_eq!(library.nodes.len(), 2);
     }
 
     #[test]
