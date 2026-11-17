@@ -245,8 +245,8 @@ and nothing is deleted.
   are added and analysed in the background, so BPM and key fill in as they finish.
   A guest stick (one exported by Serato, rekordbox or VirtualDJ) shows as one node in place
   of its drive's plain row, named after the stick. Below it is one branch per app on the
-  stick ("Serato", "rekordbox", "rekordbox (xml)", "VirtualDJ"), each with its playlists or
-  crates, and a "Files" child for the stick's own folders. A source the app cannot read
+  stick ("Serato", "rekordbox", "rekordbox (xml)", "VirtualDJ"), each with an "All tracks"
+  list, its playlists or crates, and a "Files" child for the stick's own folders. A source the app cannot read
   shows why as a note after the branch's name. The stick's rows have no Rename or Delete, and
   its tracks cannot be dropped onto your playlists; see
   [Guest sticks](interop.md#guest-sticks). Its cover menu items (Find another cover, Remove cover)
