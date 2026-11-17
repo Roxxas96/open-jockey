@@ -4,6 +4,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
+mod anlz;
+mod pdb;
+mod rekordbox_device;
 mod rekordbox_xml;
 mod serato;
 mod virtualdj;
@@ -77,7 +80,12 @@ pub struct GuestCue {
 type SourceReader = fn(&Path, &library::GuestMarkers) -> Option<GuestSource>;
 
 /// Every app's reader. A new app is one more entry; each checks its own marker.
-const READERS: &[SourceReader] = &[serato::read, rekordbox_xml::read, virtualdj::read];
+const READERS: &[SourceReader] = &[
+    serato::read,
+    rekordbox_device::read,
+    rekordbox_xml::read,
+    virtualdj::read,
+];
 
 /// Reads every app whose marker is on the stick. A failing app sets its source's `problem`
 /// and never stops the others.
