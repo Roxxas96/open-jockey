@@ -207,6 +207,42 @@ fn sticks_among(
     sticks
 }
 
+/// Every mounted volume as `(canonical root, name)`, sorted by name: each folder directly
+/// under a mount dir and, where asked, each drive letter `D:` to `Z:` besides the system
+/// drive. Left out are hidden entries, the system root (so `/Volumes/Macintosh HD`, a link
+/// to `/`, is never listed) and a mount dir that holds another. Only names are listed;
+/// nothing is read from a volume.
+pub(crate) fn mounted_volumes(mounts: &Mounts) -> Vec<(PathBuf, String)> {
+    sticks_among(
+        candidate_volumes(mounts),
+        &[],
+        &canonical_mount_dirs(mounts),
+        &system_root(),
+        |_| None,
+    )
+    .into_iter()
+    .map(|stick| (stick.root, stick.name))
+    .collect()
+}
+
+/// The folders under the mount dirs, and the existing drive letters where asked.
+fn candidate_volumes(mounts: &Mounts) -> Vec<PathBuf> {
+    let mut candidates = mounted_dirs(&mounts.dirs);
+    if mounts.drive_letters {
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
+        candidates.extend(letter_roots(&system, |root| root.exists()));
+    }
+    candidates
+}
+
+fn canonical_mount_dirs(mounts: &Mounts) -> Vec<PathBuf> {
+    mounts
+        .dirs
+        .iter()
+        .map(|m| dunce::canonicalize(m).unwrap_or_else(|_| m.clone()))
+        .collect()
+}
+
 /// The mounted volumes that can take an export: each folder directly under a mount dir (not
 /// hidden, not the filesystem root through a link), and on Windows each existing drive
 /// letter `D:` to `Z:` besides the system drive. A volume holding a library folder is left
@@ -216,20 +252,10 @@ pub(crate) fn list_sticks(reader: &Reader, mounts: &Mounts) -> anyhow::Result<Ve
         .into_iter()
         .map(|(volume, _)| volume)
         .collect();
-    let mut candidates = mounted_dirs(&mounts.dirs);
-    if mounts.drive_letters {
-        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
-        candidates.extend(letter_roots(&system, |root| root.exists()));
-    }
-    let mount_dirs: Vec<PathBuf> = mounts
-        .dirs
-        .iter()
-        .map(|m| dunce::canonicalize(m).unwrap_or_else(|_| m.clone()))
-        .collect();
     Ok(sticks_among(
-        candidates,
+        candidate_volumes(mounts),
         &library_volumes,
-        &mount_dirs,
+        &canonical_mount_dirs(mounts),
         &system_root(),
         interop::free_space,
     ))
@@ -297,6 +323,19 @@ mod tests {
         let sticks = list_sticks(&lib.reader().unwrap(), &mounts_at(temp.path())).unwrap();
         let names: Vec<&str> = sticks.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Stick"]);
+    }
+
+    #[test]
+    fn mounted_volumes_skip_hidden_entries_and_the_system_root() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".Trashes")).unwrap();
+        std::fs::create_dir_all(temp.path().join("Stick")).unwrap();
+        std::fs::write(temp.path().join("file"), b"").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/", temp.path().join("Macintosh HD")).unwrap();
+        let mounts = mounts_at(temp.path());
+        let found = mounted_volumes(&mounts);
+        assert_eq!(found, [(mounts.dirs[0].join("Stick"), "Stick".to_owned())]);
     }
 
     #[test]
