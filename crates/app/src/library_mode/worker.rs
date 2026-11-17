@@ -7,9 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use engine::{DeckId, Hotcue, TrackBuffer, TrackMemory};
 use library::{
@@ -19,7 +20,9 @@ use library::{
 
 use super::delete::{self, Deleter, Trash};
 use super::memory_sync::engine_grid;
+use super::stick_watch::{CHECK_EVERY, StickWatcher};
 use crate::format::safe;
+use crate::guest::GuestSticks;
 use crate::sticks::{Mounts, library_volumes, volume};
 
 /// The event when a playlist edit finds the entries it names moved since the window saw
@@ -163,6 +166,7 @@ pub fn spawn(
     events: Sender<Event>,
     drives: Option<Vec<Drive>>,
     trash: Arc<dyn Trash>,
+    sticks: Arc<GuestSticks>,
 ) -> std::io::Result<(Sender<Job>, JoinHandle<()>)> {
     // Unit tests must not read the real disks.
     let roots = move || {
@@ -174,11 +178,27 @@ pub fn spawn(
             }
         })
     };
-    spawn_with(lib, events, decode::decode_file, roots, trash)
+    let watching = Watching {
+        // Unit tests must not read the real mounts.
+        mounts: if cfg!(test) {
+            Mounts::default()
+        } else {
+            Mounts::usual()
+        },
+        sticks,
+    };
+    spawn_watching(lib, events, decode::decode_file, roots, trash, watching)
+}
+
+/// What the worker watches for guest sticks: the mounts, and where it keeps the sticks.
+struct Watching {
+    mounts: Mounts,
+    sticks: Arc<GuestSticks>,
 }
 
 /// [`spawn`] with the loader decoding through `decode` and the browser's tree starting
 /// at the drives `roots` gives (called on the worker thread, again at each refresh).
+#[cfg(test)]
 fn spawn_with(
     lib: Arc<Library>,
     events: Sender<Event>,
@@ -186,10 +206,27 @@ fn spawn_with(
     roots: impl Fn() -> Vec<Drive> + Send + 'static,
     trash: Arc<dyn Trash>,
 ) -> std::io::Result<(Sender<Job>, JoinHandle<()>)> {
+    // No mounts: a test never looks at the computer's volumes.
+    let watching = Watching {
+        mounts: Mounts::default(),
+        sticks: Arc::default(),
+    };
+    spawn_watching(lib, events, decode, roots, trash, watching)
+}
+
+/// [`spawn_with`] watching `watching`'s mounts for guest sticks.
+fn spawn_watching(
+    lib: Arc<Library>,
+    events: Sender<Event>,
+    decode: DecodeFn,
+    roots: impl Fn() -> Vec<Drive> + Send + 'static,
+    trash: Arc<dyn Trash>,
+    watching: Watching,
+) -> std::io::Result<(Sender<Job>, JoinHandle<()>)> {
     let (tx, rx) = channel();
     let handle = std::thread::Builder::new()
         .name("library-worker".into())
-        .spawn(move || run(&lib, &rx, &events, decode, roots, trash.as_ref()))?;
+        .spawn(move || run(&lib, &rx, &events, decode, roots, trash.as_ref(), watching))?;
     Ok((tx, handle))
 }
 
@@ -212,6 +249,7 @@ fn run(
     decode: DecodeFn,
     roots: impl Fn() -> Vec<Drive> + Send + 'static,
     trash: &dyn Trash,
+    watching: Watching,
 ) {
     let say = |text: String| {
         let _ = events.send(Event::Message(text));
@@ -231,7 +269,8 @@ fn run(
     let _ = events.send(Event::Browser(browser.view()));
     // What a delete never takes: Open Jockey's own folders.
     let own = delete::own_folders(lib.path());
-    let adder = FolderAdder::start(lib, events, Mounts::usual());
+    let adder = FolderAdder::start(lib, events, watching.mounts.clone());
+    let mut watcher = StickWatcher::start(lib, events, watching.mounts, watching.sticks);
     adder.offer(&browser);
     let (load_tx, load_rx) = channel::<LoadJob>();
     let loader_events = events.clone();
@@ -252,7 +291,18 @@ fn run(
         say(format!("error: cannot start the track loader: {e}"));
     }
 
-    for job in jobs {
+    let mut last_scan: Option<Instant> = None;
+    loop {
+        // Between jobs, the mounts are looked at every `CHECK_EVERY`.
+        if last_scan.is_none_or(|at| at.elapsed() >= CHECK_EVERY) {
+            last_scan = Some(Instant::now());
+            watcher.scan();
+        }
+        let job = match jobs.recv_timeout(CHECK_EVERY) {
+            Ok(job) => job,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         let job = match job {
             Job::AddListToPlaylist { playlist, list } => {
                 // The selection was of `list`: a search, a sort or another tree row since
@@ -853,6 +903,30 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_finds_a_stick_by_itself() {
+        let (_keep, mounts) = mount_with(&["STICK"]);
+        std::fs::create_dir(mounts.dirs[0].join("STICK").join("_Serato_")).unwrap();
+        let (_db, lib) = empty_library();
+        let (tx, rx) = channel();
+        let sticks = Arc::new(GuestSticks::default());
+        let watching = Watching {
+            mounts,
+            sticks: Arc::clone(&sticks),
+        };
+        let (_jobs, _worker) = spawn_watching(
+            Arc::new(lib),
+            tx,
+            decode::decode_file,
+            Vec::new,
+            no_trash(),
+            watching,
+        )
+        .unwrap();
+        wait_for(&rx, |e| message(e).filter(|m| m == "Stick STICK: Serato"));
+        assert_eq!(sticks.sticks().len(), 1);
+    }
+
+    #[test]
     fn browsing_a_guest_stick_adds_nothing_to_the_library() {
         let (_keep, mounts) = mount_with(&["STICK"]);
         let stick = mounts.dirs[0].join("STICK");
@@ -895,7 +969,8 @@ mod tests {
         let id = ids(&s.lib)[0];
         std::fs::remove_file(s.music.join("gone.wav")).unwrap();
         let (tx, events) = channel();
-        let (jobs, worker) = spawn(Arc::clone(&s.lib), tx, None, no_trash()).unwrap();
+        let (jobs, worker) =
+            spawn(Arc::clone(&s.lib), tx, None, no_trash(), Arc::default()).unwrap();
         jobs.send(Job::LoadTrack {
             deck: deck(2),
             track: id,
@@ -938,7 +1013,8 @@ mod tests {
             .edit_grid(id, library::GridEdit::SetBpm(120.0), None)
             .unwrap();
         let (tx, events) = channel();
-        let (jobs, _worker) = spawn(Arc::clone(&s.lib), tx, None, no_trash()).unwrap();
+        let (jobs, _worker) =
+            spawn(Arc::clone(&s.lib), tx, None, no_trash(), Arc::default()).unwrap();
         jobs.send(Job::LoadTrack {
             deck: deck(1),
             track: id,
@@ -983,7 +1059,8 @@ mod tests {
             })
             .unwrap();
         let (tx, events) = channel();
-        let (jobs, _worker) = spawn(Arc::clone(&s.lib), tx, None, no_trash()).unwrap();
+        let (jobs, _worker) =
+            spawn(Arc::clone(&s.lib), tx, None, no_trash(), Arc::default()).unwrap();
         jobs.send(Job::LoadTrack {
             deck: deck(1),
             track: id,
@@ -1024,7 +1101,8 @@ mod tests {
             }]))
             .unwrap();
         let (tx, events) = channel();
-        let (jobs, _worker) = spawn(Arc::clone(&s.lib), tx, None, no_trash()).unwrap();
+        let (jobs, _worker) =
+            spawn(Arc::clone(&s.lib), tx, None, no_trash(), Arc::default()).unwrap();
         jobs.send(Job::LoadTrack {
             deck: deck(1),
             track: id,

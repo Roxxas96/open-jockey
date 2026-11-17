@@ -870,6 +870,7 @@ mod tests {
             tx,
             Some(drives),
             Arc::clone(&trash) as Arc<dyn Trash>,
+            Arc::default(),
         )
         .unwrap();
         let setup = Setup {
