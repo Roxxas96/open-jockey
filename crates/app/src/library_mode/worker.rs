@@ -326,6 +326,9 @@ fn run(
     }
 
     let mut last_scan: Option<Instant> = None;
+    // Each guest track's grid as last edited in memory, by id (ids are never reused); a
+    // removed stick's are forgotten.
+    let mut guest_grids: HashMap<i64, Beatgrid> = HashMap::new();
     loop {
         // Between jobs, the mounts are looked at every `CHECK_EVERY`.
         if last_scan.is_none_or(|at| at.elapsed() >= CHECK_EVERY) {
@@ -337,6 +340,7 @@ fn run(
         let generation = sticks.generation();
         if generation != guests_seen {
             guests_seen = generation;
+            guest_grids.retain(|&id, _| sticks.is_plugged(id));
             match browser.set_guests(sticks.nodes()) {
                 Ok(view) => {
                     let _ = events.send(Event::Browser(view));
@@ -564,16 +568,22 @@ fn run(
                 edit,
                 playhead,
                 sample_rate,
-            } => match lib.edit_grid_in_memory(track, current, edit, Some(playhead), sample_rate) {
-                Ok(grid) => {
-                    let _ = events.send(Event::Grid { deck, track, grid });
+            } => {
+                // Edits sent in a row each start from the one before, not from the grid the
+                // deck had when they were sent.
+                let current = guest_grids.get(&track).copied().unwrap_or(current);
+                match lib.edit_grid_in_memory(track, current, edit, Some(playhead), sample_rate) {
+                    Ok(grid) => {
+                        guest_grids.insert(track, grid);
+                        let _ = events.send(Event::Grid { deck, track, grid });
+                    }
+                    Err(e) => say(format!(
+                        "Deck {}: beatgrid not changed: {}",
+                        deck_number(deck),
+                        safe(e)
+                    )),
                 }
-                Err(e) => say(format!(
-                    "Deck {}: beatgrid not changed: {}",
-                    deck_number(deck),
-                    safe(e)
-                )),
-            },
+            }
             Job::Grid {
                 deck,
                 track,
