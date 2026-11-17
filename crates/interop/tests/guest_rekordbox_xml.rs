@@ -148,3 +148,118 @@ fn malformed_rekordbox_xml_sets_a_problem() {
     let read = read_stick(dir.path(), "T");
     assert!(xml(&read).problem.is_some());
 }
+
+/// A temp stick with empty-ish files at the given relative paths and a one-track XML naming
+/// `Name.mp3` somewhere off the stick.
+fn stick_with_files(files: &[&str]) -> tempfile::TempDir {
+    let dir = stick_with("");
+    for rel in files {
+        let path = rel
+            .split('/')
+            .fold(dir.path().to_path_buf(), |p, part| p.join(part));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy(
+            fixture().join("VirtualDJ tracks").join("OJ Click 126.mp3"),
+            path,
+        )
+        .unwrap();
+    }
+    fs::remove_dir_all(dir.path().join("Music")).unwrap();
+    fs::write(
+        dir.path().join("rekordbox.xml"),
+        one_track_xml("file://localhost/Elsewhere/t.mp3", ""),
+    )
+    .unwrap();
+    dir
+}
+
+fn only_track_path(dir: &tempfile::TempDir) -> (Option<PathBuf>, Option<String>) {
+    let read = read_stick(dir.path(), "T");
+    let source = xml(&read);
+    (
+        source
+            .tracks
+            .first()
+            .map(|t| t.path.strip_prefix(dir.path()).unwrap().to_path_buf()),
+        source.problem.clone(),
+    )
+}
+
+#[test]
+fn the_normal_fixture_reads_without_a_problem() {
+    let stick = read_stick(&fixture(), "OJGUEST");
+    assert_eq!(xml(&stick).problem, None);
+}
+
+#[test]
+fn a_true_tie_is_noted() {
+    let dir = stick_with_files(&["B/t.mp3", "A/t.mp3"]);
+    let (path, problem) = only_track_path(&dir);
+    assert_eq!(path, Some(Path::new("A").join("t.mp3")));
+    assert!(problem.unwrap().contains("several files"));
+}
+
+#[test]
+fn contents_is_preferred_and_a_shorter_path_decides() {
+    let dir = stick_with_files(&[
+        "t.mp3",
+        "Other/t.mp3",
+        "Contents/X/Y/t.mp3",
+        "Contents/Z/t.mp3",
+    ]);
+    let (path, problem) = only_track_path(&dir);
+    assert_eq!(path, Some(["Contents", "Z", "t.mp3"].iter().collect()));
+    assert_eq!(problem, None);
+}
+
+#[test]
+fn the_name_search_is_bounded_in_depth_and_skips_hidden_folders() {
+    let deep = stick_with_files(&["a/b/c/d/e/f/g/t.mp3"]);
+    assert_eq!(only_track_path(&deep).0, None);
+    let ok = stick_with_files(&["a/b/c/d/e/f/t.mp3"]);
+    assert!(only_track_path(&ok).0.is_some());
+    let hidden = stick_with_files(&[".trash/t.mp3"]);
+    assert_eq!(only_track_path(&hidden).0, None);
+}
+
+#[test]
+fn fades_and_load_markers_never_become_the_main_cue() {
+    let body = r#"<DJ_PLAYLISTS><COLLECTION Entries="1">
+<TRACK TrackID="1" Name="M" Location="file://localhost/Music/OJ%20Click%20126.mp3">
+<POSITION_MARK Name="" Type="3" Start="1.0" Num="-1"/>
+<POSITION_MARK Name="" Type="4" Start="2.0" End="3.0" Num="-1"/>
+<POSITION_MARK Name="" Type="0" Start="4.0" Num="-1"/>
+<POSITION_MARK Name="" Type="0" Start="5.0" Num="-1"/>
+</TRACK></COLLECTION></DJ_PLAYLISTS>"#;
+    let dir = stick_with(body);
+    let read = read_stick(dir.path(), "T");
+    let source = xml(&read);
+    assert_eq!(source.tracks[0].main_cue, Some(4.0));
+    assert!(source.tracks[0].hotcues.is_empty());
+}
+
+#[test]
+fn a_truncated_rekordbox_xml_is_flagged() {
+    let body = r#"<DJ_PLAYLISTS><COLLECTION Entries="1">
+<TRACK TrackID="1" Name="M" Location="file://localhost/Music/OJ%20Click%20126.mp3">"#;
+    let dir = stick_with(body);
+    let read = read_stick(dir.path(), "T");
+    assert!(xml(&read).problem.as_deref().unwrap().contains("truncated"));
+}
+
+#[test]
+fn a_playlist_inside_a_playlist_keeps_the_outer_one() {
+    let playlists = r#"<NODE Type="0" Name="ROOT"><NODE Type="1" Name="Outer"><TRACK Key="1"/>
+<NODE Type="1" Name="Inner"><TRACK Key="1"/></NODE></NODE></NODE>"#;
+    let stick = stick_with(&one_track_xml(
+        "file://localhost/Music/OJ%20Click%20126.mp3",
+        playlists,
+    ));
+    let read = read_stick(stick.path(), "T");
+    let names: Vec<&str> = xml(&read)
+        .playlists
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["Outer", "Outer / Inner"]);
+}
