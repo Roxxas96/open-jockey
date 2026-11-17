@@ -1314,7 +1314,23 @@ mod tests {
             })
             .unwrap();
         let flying = "a.wav is loaded on deck 1: unload it first.";
-        assert_eq!(s.delete(target.clone()).0, flying);
+        s.jobs
+            .send(Job::Delete {
+                target: target.clone(),
+                decks: DeckFiles::default(),
+            })
+            .unwrap();
+        // The refusal and the decoded load, in whichever order they come: the session can
+        // only take a load once it is decoded, so it waits for it before saying so below.
+        let (mut refusal, mut decoded) = (None, false);
+        while refusal.is_none() || !decoded {
+            match s.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Event::Loaded(loaded) if loaded.seq == 3 => decoded = true,
+                Event::Message(text) if !text.starts_with("warning: ") => refusal = Some(text),
+                _ => {}
+            }
+        }
+        assert_eq!(refusal.as_deref(), Some(flying));
         assert!(s.trash.moved().is_empty());
         // Taken (a later load replaced it on the deck): the folder can go.
         let decks = DeckFiles {
