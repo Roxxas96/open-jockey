@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::Drive;
+use super::guest::{GuestKey, GuestList, GuestNode};
 use crate::PlaylistSummary;
 use crate::scan::is_hidden;
 
@@ -20,6 +21,12 @@ pub enum TreeKind {
     /// The node the playlists sit under.
     Playlists,
     Playlist,
+    /// A guest stick, in place of its drive; its apps' branches are below it.
+    GuestStick,
+    /// One app's part of a guest stick; its lists are below it.
+    GuestBranch,
+    /// A playlist or crate of a guest stick.
+    GuestList,
 }
 
 /// One visible row of the folder tree.
@@ -32,7 +39,7 @@ pub struct TreeRow {
     /// Open, showing its children (the Playlists node always is).
     pub expanded: bool,
     /// Why an open folder shows no children, such as "cannot read".
-    pub note: Option<&'static str>,
+    pub note: Option<String>,
     /// The library id of a playlist's row; `None` for every other row.
     pub playlist: Option<i64>,
     /// A folder row's folder on disk, as the tree read it; `None` for every other row.
@@ -48,6 +55,15 @@ pub(super) enum Target {
     Playlists,
     /// A playlist and its entry count.
     Playlist { id: i64, len: usize },
+    /// A list of a guest stick: the `list`th of branch `branch` of stick `stick` (as
+    /// [`Tree::guests`] has them).
+    Guest {
+        stick: usize,
+        branch: usize,
+        list: usize,
+    },
+    /// Nothing: a guest stick's row (no `branch`) or an app's branch of it.
+    GuestHeader { stick: usize, branch: Option<usize> },
 }
 
 impl Target {
@@ -70,25 +86,27 @@ struct Node {
 #[derive(Debug, Clone)]
 pub(super) struct Tree {
     nodes: Vec<Node>,
+    /// The drives the tree was given, in order.
+    drives: Vec<Drive>,
+    /// The guest sticks; each shows in place of the drive at its root.
+    guests: Vec<GuestNode>,
 }
 
 impl Tree {
     /// The drives (closed), then the Playlists node, open, with `playlists` below it.
     pub(super) fn new(roots: Vec<Drive>, playlists: &[PlaylistSummary]) -> Self {
-        let mut nodes: Vec<Node> = roots
-            .into_iter()
-            .map(|d| Node {
-                row: row(d.name, 0, TreeKind::Drive),
-                target: Target::Dir(d.path),
-            })
-            .collect();
         let mut playlists_node = row("Playlists".to_owned(), 0, TreeKind::Playlists);
         playlists_node.expanded = true;
-        nodes.push(Node {
+        let nodes = vec![Node {
             row: playlists_node,
             target: Target::Playlists,
-        });
-        let mut tree = Self { nodes };
+        }];
+        let mut tree = Self {
+            nodes,
+            drives: Vec::new(),
+            guests: Vec::new(),
+        };
+        tree.set_drives(roots);
         tree.set_playlists(playlists);
         tree
     }
@@ -96,31 +114,119 @@ impl Tree {
     /// Replaces the drives with `roots`, in their order. A drive still there (at the same
     /// path) keeps its row and the folders open below it; a new one comes in closed.
     pub(super) fn set_drives(&mut self, roots: Vec<Drive>) {
+        self.drives = roots;
+        self.rebuild_drives();
+    }
+
+    /// Replaces the guest sticks with `guests`. Each shows in place of the drive at its
+    /// root (a stick with no such drive is not shown); the folders open under a stick's
+    /// "Files" stay open.
+    pub(super) fn set_guests(&mut self, guests: Vec<GuestNode>) {
+        self.guests = guests;
+        self.rebuild_drives();
+    }
+
+    /// The rows of the drives (and guest sticks) again, keeping what is open.
+    fn rebuild_drives(&mut self) {
         let at = self
             .nodes
             .iter()
             .position(|n| n.target == Target::Playlists)
             .unwrap_or(self.nodes.len() - 1);
         let old: Vec<Node> = self.nodes.drain(..at).collect();
-        let mut drives = Vec::with_capacity(old.len().max(roots.len()));
-        for drive in roots {
-            let target = Target::Dir(drive.path);
-            match old
+        let mut rows = Vec::with_capacity(old.len().max(self.drives.len()));
+        for drive in &self.drives {
+            let stick = self
+                .guests
                 .iter()
-                .position(|n| n.row.depth == 0 && n.target == target)
-            {
+                .position(|g| same_root(&g.root, &drive.path));
+            if let Some(stick) = stick {
+                guest_rows(&mut rows, &old, drive, stick, &self.guests[stick]);
+                continue;
+            }
+            let target = Target::Dir(drive.path.clone());
+            match old.iter().position(|n| {
+                n.row.depth == 0 && n.row.kind == TreeKind::Drive && n.target == target
+            }) {
                 Some(i) => {
-                    let start = drives.len();
-                    drives.extend(old[i..subtree_end(&old, i)].iter().cloned());
-                    drives[start].row.label = drive.name;
+                    let start = rows.len();
+                    rows.extend(old[i..subtree_end(&old, i)].iter().cloned());
+                    rows[start].row.label.clone_from(&drive.name);
                 }
-                None => drives.push(Node {
-                    row: row(drive.name, 0, TreeKind::Drive),
+                None => rows.push(Node {
+                    row: row(drive.name.clone(), 0, TreeKind::Drive),
                     target,
                 }),
             }
         }
-        self.nodes.splice(0..0, drives);
+        self.nodes.splice(0..0, rows);
+    }
+
+    /// Guest list `list` of branch `branch` of stick `stick`.
+    pub(super) fn guest_list(
+        &self,
+        stick: usize,
+        branch: usize,
+        list: usize,
+    ) -> Option<&GuestList> {
+        self.guests
+            .get(stick)?
+            .branches
+            .get(branch)?
+            .lists
+            .get(list)
+    }
+
+    /// What names the guest row `target` is, if it is one.
+    pub(super) fn guest_key(&self, target: &Target) -> Option<GuestKey> {
+        let (stick, branch, list) = match *target {
+            Target::Guest {
+                stick,
+                branch,
+                list,
+            } => (stick, Some(branch), Some(list)),
+            Target::GuestHeader { stick, branch } => (stick, branch, None),
+            _ => return None,
+        };
+        let node = self.guests.get(stick)?;
+        let branch = branch.and_then(|b| node.branches.get(b));
+        Some(GuestKey {
+            root: node.root.clone(),
+            branch: branch.map(|b| b.label.clone()),
+            list: list
+                .and_then(|l| branch?.lists.get(l))
+                .map(|l| l.name.clone()),
+        })
+    }
+
+    /// The target of the guest row `key` names, if it is there.
+    pub(super) fn guest_target(&self, key: &GuestKey) -> Option<Target> {
+        let stick = self.guests.iter().position(|g| g.root == key.root)?;
+        let Some(label) = &key.branch else {
+            return Some(Target::GuestHeader {
+                stick,
+                branch: None,
+            });
+        };
+        let branch = self.guests[stick]
+            .branches
+            .iter()
+            .position(|b| b.label == *label)?;
+        let Some(name) = &key.list else {
+            return Some(Target::GuestHeader {
+                stick,
+                branch: Some(branch),
+            });
+        };
+        let list = self.guests[stick].branches[branch]
+            .lists
+            .iter()
+            .position(|l| l.name == *name)?;
+        Some(Target::Guest {
+            stick,
+            branch,
+            list,
+        })
     }
 
     pub(super) fn len(&self) -> usize {
@@ -144,13 +250,23 @@ impl Tree {
     pub(super) fn drive_of(&self, path: &Path) -> Option<&str> {
         self.nodes
             .iter()
-            .filter(|n| n.row.kind == TreeKind::Drive)
-            .filter_map(|n| match &n.target {
-                Target::Dir(dir) if path.starts_with(dir) => Some((dir, &n.row.label)),
+            .filter_map(|n| match (&n.target, n.row.kind) {
+                (Target::Dir(dir), TreeKind::Drive) => Some((dir.as_path(), n.row.label.as_str())),
+                (
+                    Target::GuestHeader {
+                        stick,
+                        branch: None,
+                    },
+                    TreeKind::GuestStick,
+                ) => Some((
+                    self.guests.get(*stick)?.root.as_path(),
+                    n.row.label.as_str(),
+                )),
                 _ => None,
             })
+            .filter(|(dir, _)| path.starts_with(dir))
             .max_by_key(|(dir, _)| dir.components().count())
-            .map(|(_, label)| label.as_str())
+            .map(|(_, label)| label)
     }
 
     /// Takes out the folders that are no longer on disk (a folder moved to the Trash), with
@@ -196,6 +312,7 @@ impl Tree {
         let Target::Dir(dir) = &self.nodes[index].target else {
             return;
         };
+        let dir = dir.clone();
         if self.nodes[index].row.expanded {
             let end = self.subtree_end(index);
             self.nodes.drain(index + 1..end);
@@ -204,7 +321,7 @@ impl Tree {
             closed.note = None;
             return;
         }
-        let read = subfolders(dir);
+        let read = subfolders(&dir);
         let opened = &mut self.nodes[index].row;
         opened.expanded = true;
         let depth = opened.depth.saturating_add(1);
@@ -219,7 +336,7 @@ impl Tree {
                 });
                 self.nodes.splice(index + 1..index + 1, children);
             }
-            Err(_) => opened.note = Some("cannot read"),
+            Err(_) => opened.note = Some("cannot read".to_owned()),
         }
     }
 
@@ -257,6 +374,70 @@ fn subtree_end(nodes: &[Node], index: usize) -> usize {
         .iter()
         .position(|n| n.row.depth <= depth)
         .map_or(nodes.len(), |i| index + 1 + i)
+}
+
+/// Pushes the rows of guest stick `guest` shown in place of `drive`: the stick, each app's
+/// branch with its lists, then "Files", the stick's own folders (kept open as they were in
+/// `old`).
+fn guest_rows(rows: &mut Vec<Node>, old: &[Node], drive: &Drive, stick: usize, guest: &GuestNode) {
+    let node = |label: &str, depth, kind, target| Node {
+        row: TreeRow {
+            expanded: matches!(kind, TreeKind::GuestStick | TreeKind::GuestBranch),
+            ..row(label.to_owned(), depth, kind)
+        },
+        target,
+    };
+    rows.push(node(
+        &drive.name,
+        0,
+        TreeKind::GuestStick,
+        Target::GuestHeader {
+            stick,
+            branch: None,
+        },
+    ));
+    for (b, branch) in guest.branches.iter().enumerate() {
+        let mut branch_node = node(
+            &branch.label,
+            1,
+            TreeKind::GuestBranch,
+            Target::GuestHeader {
+                stick,
+                branch: Some(b),
+            },
+        );
+        branch_node.row.note.clone_from(&branch.note);
+        rows.push(branch_node);
+        for (l, list) in branch.lists.iter().enumerate() {
+            rows.push(node(
+                &list.name,
+                2,
+                TreeKind::GuestList,
+                Target::Guest {
+                    stick,
+                    branch: b,
+                    list: l,
+                },
+            ));
+        }
+    }
+    let target = Target::Dir(drive.path.clone());
+    let files = old.iter().position(|n| {
+        n.row.depth == 1
+            && n.row.kind == TreeKind::Folder
+            && n.row.path.is_none()
+            && n.target == target
+    });
+    match files {
+        Some(i) => rows.extend(old[i..subtree_end(old, i)].iter().cloned()),
+        // Not a folder the owner can delete: it has no path of its own.
+        None => rows.push(node("Files", 1, TreeKind::Folder, target)),
+    }
+}
+
+/// Whether the guest stick mounted at `a` is on the drive at `b`.
+fn same_root(a: &Path, b: &Path) -> bool {
+    a == b || matches!((dunce::canonicalize(a), dunce::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 fn row(label: String, depth: u8, kind: TreeKind) -> TreeRow {

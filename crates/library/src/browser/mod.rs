@@ -8,6 +8,7 @@
 //! 50,000-track playlist never builds all its rows.
 
 mod drives;
+mod guest;
 mod tree;
 
 use std::collections::{HashMap, HashSet};
@@ -15,10 +16,12 @@ use std::path::{Path, PathBuf};
 
 pub use actions::BrowserRequest;
 pub use drives::{Drive, GuestMarkers, drives, guest_markers};
+pub use guest::{GuestBranch, GuestList, GuestNode};
 pub use tree::{TreeKind, TreeRow};
 
 use crate::scan::{is_hidden, is_supported, normalize_path};
 use crate::{LibraryError, Reader, TrackFilter, TrackRow, TrackSort, TrackSortKey};
+use guest::GuestKey;
 use tree::{Target, Tree};
 
 /// How many rows of a list the browser holds at once: one page around the cursor.
@@ -177,6 +180,8 @@ enum Items {
     },
     /// A playlist's entries that match `query`, in its order.
     Playlist { id: i64, query: Query },
+    /// A guest list's rows that match the query, in the query's order or the list's.
+    Guest { rows: Vec<(PathBuf, TrackRow)> },
 }
 
 /// The highlighted entry's list: its rows' source, length, cursor and loaded page.
@@ -197,8 +202,8 @@ struct List {
 impl List {
     /// The list of `target` filtered and ordered by `query`, with the cursor on its first
     /// row and that row's page loaded. A folder's files are read here, once.
-    fn open(reader: &Reader, target: &Target, query: &Query) -> Result<Self, LibraryError> {
-        let (items, count) = match target {
+    fn open(reader: &Reader, tree: &Tree, at: usize, query: &Query) -> Result<Self, LibraryError> {
+        let (items, count) = match tree.target(at) {
             Target::Dir(dir) => {
                 let items = folder_items(reader, dir, query)?;
                 let count = match &items {
@@ -207,7 +212,19 @@ impl List {
                 };
                 (items, count)
             }
-            Target::Playlists => (Items::None, 0),
+            Target::Playlists | Target::GuestHeader { .. } => (Items::None, 0),
+            &Target::Guest {
+                stick,
+                branch,
+                list,
+            } => {
+                let rows = tree
+                    .guest_list(stick, branch, list)
+                    .map(|list| guest::rows_for(list, query))
+                    .unwrap_or_default();
+                let count = rows.len();
+                (Items::Guest { rows }, count)
+            }
             Target::Playlist { id, len } => {
                 let count = match &query.text {
                     Some(text) => reader.playlist_match_count(*id, text)?,
@@ -221,6 +238,7 @@ impl List {
             Items::Playlist { id, query } => {
                 Some(reader.playlist_seconds(*id, query.text.as_deref())?)
             }
+            Items::Guest { rows } => Some(guest::total_seconds(rows)),
             _ => None,
         };
         let mut list = Self {
@@ -329,7 +347,7 @@ impl Browser {
     ) -> Result<Self, LibraryError> {
         let tree = Tree::new(roots(), &reader.playlists()?);
         let query = Query::default();
-        let list = List::open(&reader, tree.target(0), &query)?;
+        let list = List::open(&reader, &tree, 0, &query)?;
         Ok(Self {
             reader,
             roots: Box::new(roots),
@@ -419,7 +437,7 @@ impl Browser {
             BrowserEdit::SelectTree(at) => {
                 let to = at.min(self.tree.len() - 1);
                 if to != self.tree_cursor {
-                    self.list = List::open(&self.reader, self.tree.target(to), &self.query)?;
+                    self.list = List::open(&self.reader, &self.tree, to, &self.query)?;
                     self.tree_cursor = to;
                 }
                 self.focus = Focus::Tree;
@@ -460,7 +478,7 @@ impl Browser {
     /// that its views stay newer than every query the window sent.
     fn requery(&mut self, query: Query, seq: u64) -> Result<(), LibraryError> {
         self.seq = seq;
-        self.list = List::open(&self.reader, self.tree.target(self.tree_cursor), &query)?;
+        self.list = List::open(&self.reader, &self.tree, self.tree_cursor, &query)?;
         self.query = query;
         Ok(())
     }
@@ -474,7 +492,7 @@ impl Browser {
         let mut tree = self.tree.clone();
         tree.toggle(at);
         if cursor > at && cursor < end {
-            self.list = List::open(&self.reader, tree.target(at), &self.query)?;
+            self.list = List::open(&self.reader, &tree, at, &self.query)?;
             self.tree_cursor = at;
         } else if cursor > at {
             self.tree_cursor = (cursor + tree.len()).saturating_sub(self.tree.len());
@@ -498,7 +516,43 @@ impl Browser {
         tree.set_drives((self.roots)());
         tree.drop_gone_folders();
         tree.set_playlists(&self.reader.playlists()?);
-        let current = self.tree.target(self.tree_cursor);
+        let current = self.tree.target(self.tree_cursor).clone();
+        self.reseat(tree, &current)
+    }
+
+    /// Shows the guest sticks `guests` (each in place of its drive; one that is gone is
+    /// taken out) and returns the new view. The highlighted guest row stays highlighted
+    /// (found by its stick, app and list names); when its stick or list is gone, the
+    /// highlight goes to the stick's plain drive row if the drive is still there, else it
+    /// stays at the same tree row, as [`Browser::refresh`] leaves it.
+    ///
+    /// # Errors
+    ///
+    /// Any database error; the browser is then unchanged.
+    pub fn set_guests(&mut self, guests: Vec<GuestNode>) -> Result<BrowserView, LibraryError> {
+        let key: Option<GuestKey> = self.tree.guest_key(self.tree.target(self.tree_cursor));
+        let mut tree = self.tree.clone();
+        tree.set_guests(guests);
+        let current = match &key {
+            Some(key) => tree.guest_target(key).or_else(|| {
+                // The stick's own drive, now plain again.
+                tree.position(&Target::Dir(key.root.clone()))
+                    .map(|_| Target::Dir(key.root.clone()))
+            }),
+            None => Some(self.tree.target(self.tree_cursor).clone()),
+        };
+        // With nothing of it left the entry is not found: the highlight stays at the same
+        // tree row.
+        let gone = Target::GuestHeader {
+            stick: usize::MAX,
+            branch: None,
+        };
+        self.reseat(tree, current.as_ref().unwrap_or(&gone))
+    }
+
+    /// Takes `tree` in place of the tree, keeping the highlight on the entry `current`
+    /// (which is in `tree` or not) and the selected row in its list.
+    fn reseat(&mut self, tree: Tree, current: &Target) -> Result<BrowserView, LibraryError> {
         let same_row =
             self.tree_cursor < tree.len() && tree.target(self.tree_cursor).same_entry(current);
         let found = if same_row {
@@ -508,7 +562,7 @@ impl Browser {
         };
         let (tree_cursor, mut list, list_cursor) = match found {
             Some(i) => {
-                let list = List::open(&self.reader, tree.target(i), &self.query)?;
+                let list = List::open(&self.reader, &tree, i, &self.query)?;
                 let at = match self.list.selected() {
                     Some(row) => find_row(&self.reader, &list, row, self.list.cursor)?,
                     None => None,
@@ -517,7 +571,7 @@ impl Browser {
             }
             None => {
                 let i = self.tree_cursor.min(tree.len() - 1);
-                (i, List::open(&self.reader, tree.target(i), &self.query)?, 0)
+                (i, List::open(&self.reader, &tree, i, &self.query)?, 0)
             }
         };
         list.seek(&self.reader, list_cursor)?;
@@ -603,6 +657,7 @@ impl Browser {
     pub fn list_track_ids(&self) -> Result<Vec<i64>, LibraryError> {
         Ok(match &self.list.items {
             Items::None => Vec::new(),
+            Items::Guest { rows } => rows.iter().map(|(_, row)| row.id).collect(),
             Items::Files { files, tracks, .. } => files
                 .iter()
                 .filter_map(|path| tracks.get(path).map(|t| t.id))
@@ -622,7 +677,7 @@ impl Browser {
     pub fn list_files(&self) -> Vec<PathBuf> {
         match &self.list.items {
             Items::Files { files, .. } => files.clone(),
-            Items::None | Items::Playlist { .. } => Vec::new(),
+            Items::None | Items::Playlist { .. } | Items::Guest { .. } => Vec::new(),
         }
     }
 
@@ -641,8 +696,15 @@ impl Browser {
                 .into_iter()
                 .map(|(_, track, position)| (position, track.id))
                 .collect(),
-            Items::None | Items::Files { .. } => Vec::new(),
+            Items::None | Items::Files { .. } | Items::Guest { .. } => Vec::new(),
         })
+    }
+
+    /// The list shown is a guest stick's: its rows have ids below zero and nothing in it
+    /// can be changed.
+    #[must_use]
+    pub fn shows_guest_list(&self) -> bool {
+        matches!(self.list.items, Items::Guest { .. })
     }
 
     /// The name the tree gives the drive `path` is on, if it shows that drive.
@@ -666,7 +728,7 @@ impl Browser {
     fn move_tree(&mut self, steps: i32) -> Result<(), LibraryError> {
         let to = step(self.tree_cursor, steps, self.tree.len());
         if to != self.tree_cursor {
-            self.list = List::open(&self.reader, self.tree.target(to), &self.query)?;
+            self.list = List::open(&self.reader, &self.tree, to, &self.query)?;
             self.tree_cursor = to;
         }
         Ok(())
@@ -794,6 +856,19 @@ fn file_name(path: &Path) -> String {
 fn page(reader: &Reader, items: &Items, offset: usize) -> Result<Vec<ListRow>, LibraryError> {
     let mut rows = match items {
         Items::None => Vec::new(),
+        Items::Guest { rows } => rows
+            .iter()
+            .skip(offset)
+            .take(BROWSER_PAGE_ROWS)
+            .map(|(path, track)| ListRow {
+                path: path.clone(),
+                track: Some(track.clone()),
+                file_name: file_name(path),
+                position: None,
+                cover_file: None,
+                cover: None,
+            })
+            .collect(),
         Items::Files { files, tracks, .. } => files
             .iter()
             .skip(offset)
@@ -829,6 +904,8 @@ fn page(reader: &Reader, items: &Items, offset: usize) -> Result<Vec<ListRow>, L
     let tracks: Vec<i64> = rows
         .iter()
         .filter_map(|r| r.track.as_ref().map(|t| t.id))
+        // A guest track has no cover row of the library's.
+        .filter(|&id| id >= 0)
         .collect();
     let states = crate::covers::cover_states(reader, &tracks)?;
     for row in &mut rows {
@@ -849,6 +926,10 @@ fn find_row(
     match &list.items {
         Items::None => Ok(None),
         Items::Files { files, .. } => Ok(files.iter().position(|p| *p == row.path)),
+        Items::Guest { rows } => {
+            let id = row.track.as_ref().map(|t| t.id);
+            Ok(rows.iter().position(|(_, r)| Some(r.id) == id))
+        }
         Items::Playlist { id, query } => {
             let Some(track) = row.track.as_ref().map(|t| t.id) else {
                 return Ok(None);

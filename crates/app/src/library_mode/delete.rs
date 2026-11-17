@@ -30,6 +30,9 @@ use crate::format::safe;
 /// The event when a whole-list delete finds the list changed since the window selected it.
 pub const LIST_CHANGED: &str = "The list changed: nothing was deleted";
 
+/// The refusal when a delete is aimed at a guest stick's list.
+pub const GUEST_UNCHANGED: &str = "A guest stick is never changed";
+
 /// How many tracks one [`WriteOp::MarkMissing`] flags.
 const MISSING_BATCH: usize = 500;
 
@@ -561,6 +564,18 @@ fn resolve(target: &DeleteTarget, browser: &Browser, reader: &Reader) -> Result<
     let whole = |list: &library::ListIdentity, playlist: bool| {
         browser.identity() == *list && browser.all_selected() && list.playlist.is_some() == playlist
     };
+    // A guest list's rows are the stick's own files: whatever the window asked, no delete
+    // reaches them.
+    if browser.shows_guest_list()
+        && matches!(
+            target,
+            DeleteTarget::Files { .. }
+                | DeleteTarget::AllFiles { .. }
+                | DeleteTarget::AllEntries { .. }
+        )
+    {
+        return Err(GUEST_UNCHANGED.to_owned());
+    }
     Ok(match target {
         DeleteTarget::Entries { playlist, entries } => Resolved::Entries {
             playlist: *playlist,
@@ -980,6 +995,90 @@ mod tests {
                 other => panic!("unexpected outcome {other:?}"),
             }
         }
+    }
+
+    /// A browser on a guest stick's list (a stick "STICK" at `root`, one list of one row at
+    /// `root/a.wav`, a real file), and the library it is on.
+    fn guest_browser(root: &Path) -> (tempfile::TempDir, Library, Browser) {
+        use library::{GuestBranch, GuestList, GuestNode, TrackRow};
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("library.sqlite3")).unwrap();
+        let drive = Drive {
+            name: "STICK".into(),
+            path: root.to_owned(),
+        };
+        let mut browser =
+            Browser::with_roots(lib.reader().unwrap(), move || vec![drive.clone()]).unwrap();
+        let row = TrackRow {
+            id: -1,
+            title: Some("a".into()),
+            artist: None,
+            bpm: None,
+            key: None,
+            duration_frames: None,
+            sample_rate: None,
+            has_cues: false,
+            missing: false,
+        };
+        let view = browser
+            .set_guests(vec![GuestNode {
+                name: "STICK".into(),
+                root: root.to_owned(),
+                branches: vec![GuestBranch {
+                    label: "Serato".into(),
+                    note: None,
+                    lists: vec![GuestList {
+                        name: "Crate".into(),
+                        rows: vec![(root.join("a.wav"), row)],
+                    }],
+                }],
+            }])
+            .unwrap();
+        let at = view
+            .tree
+            .iter()
+            .position(|r| r.kind == library::TreeKind::GuestList)
+            .unwrap();
+        browser.edit(BrowserEdit::SelectTree(at)).unwrap();
+        (dir, lib, browser)
+    }
+
+    #[test]
+    fn delete_on_a_guest_list_changes_nothing() {
+        let stick = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(stick.path()).unwrap();
+        std::fs::copy(FIXTURE, root.join("a.wav")).unwrap();
+        let (_dir, lib, mut browser) = guest_browser(&root);
+        assert!(browser.shows_guest_list());
+        let reader = lib.reader().unwrap();
+        let writer = lib.writer();
+        let trash = FakeTrash::new(&root.join("bin"));
+        let own = Vec::new();
+        let what = [
+            DeleteTarget::Files {
+                paths: vec![root.join("a.wav")],
+            },
+            DeleteTarget::AllFiles {
+                list: browser.identity(),
+            },
+        ];
+        browser.edit(BrowserEdit::SelectAll).unwrap();
+        for target in what {
+            let refused = ask(&target, &browser, &reader, &[], &own);
+            assert_eq!(refused, Err("A guest stick is never changed".to_owned()));
+            let deleter = Deleter {
+                reader: &reader,
+                writer: &writer,
+                browser: &browser,
+                trash: &trash,
+                own: &own,
+            };
+            let done = deleter.delete(&target, &[]);
+            assert!(!done.refresh);
+            assert_eq!(done.messages, ["A guest stick is never changed"]);
+        }
+        assert!(root.join("a.wav").exists());
+        assert!(trash.moved().is_empty());
     }
 
     fn deck(n: usize) -> DeckId {

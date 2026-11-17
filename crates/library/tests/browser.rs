@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use library::{
-    BROWSER_PAGE_ROWS, Browser, BrowserEdit, BrowserRequest, BrowserView, Drive, Focus, Library,
-    RawStatement, TrackSortKey, TreeKind, WriteOp, WriteOutcome,
+    BROWSER_PAGE_ROWS, Browser, BrowserEdit, BrowserRequest, BrowserView, Drive, Focus,
+    GuestBranch, GuestList, GuestNode, Library, RawStatement, TrackSortKey, TreeKind, WriteOp,
+    WriteOutcome,
 };
 use rusqlite::types::Value;
 
@@ -256,7 +257,7 @@ fn unreadable_folder_says_so() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(labels(&view), ["root", "A", "B", "Locked", "Playlists"]);
     assert!(view.tree[3].expanded);
-    assert_eq!(view.tree[3].note, Some("cannot read"));
+    assert_eq!(view.tree[3].note.as_deref(), Some("cannot read"));
     let view = scroll(&mut b, 1);
     assert_eq!(view.path, "Playlists");
     assert_eq!(view.tree_cursor, 4);
@@ -1506,4 +1507,170 @@ fn list_seconds_sums_the_list() {
     let mut b = browser(&lib, vec![drive("D", &root)]);
     let view = b.edit(BrowserEdit::SelectTree(0)).unwrap();
     assert_eq!((view.playlist, view.list_seconds), (None, None));
+}
+
+/// A guest track row with the negative `id`, titled `title`, by `artist`.
+fn guest_row(id: i64, title: &str, artist: &str, bpm: f64) -> (PathBuf, library::TrackRow) {
+    let row = library::TrackRow {
+        id,
+        title: Some(title.to_owned()),
+        artist: Some(artist.to_owned()),
+        bpm: Some(bpm),
+        key: None,
+        duration_frames: None,
+        sample_rate: None,
+        has_cues: false,
+        missing: false,
+    };
+    (PathBuf::from(format!("/stick/{title}.mp3")), row)
+}
+
+fn guest_list(name: &str, rows: Vec<(PathBuf, library::TrackRow)>) -> GuestList {
+    GuestList {
+        name: name.to_owned(),
+        rows,
+    }
+}
+
+/// The stick "OJGUEST" at `root`: a Serato branch with two lists, then a rekordbox (xml)
+/// branch with a note and one list.
+fn guest_stick(root: &Path) -> GuestNode {
+    GuestNode {
+        name: "OJGUEST".to_owned(),
+        root: root.to_owned(),
+        branches: vec![
+            GuestBranch {
+                label: "Serato".to_owned(),
+                note: None,
+                lists: vec![
+                    guest_list(
+                        "OJ Serato A",
+                        vec![
+                            guest_row(-3, "Sunrise", "Zed", 124.0),
+                            guest_row(-1, "Afterglow", "Amy", 128.0),
+                            guest_row(-2, "Bassline", "Bob", 120.0),
+                        ],
+                    ),
+                    guest_list(
+                        "OJ Serato B",
+                        vec![guest_row(-4, "Deep Night", "Amy", 126.0)],
+                    ),
+                ],
+            },
+            GuestBranch {
+                label: "rekordbox (xml)".to_owned(),
+                note: Some("2 tracks could not be read".to_owned()),
+                lists: vec![guest_list(
+                    "OJ Rekordbox",
+                    vec![guest_row(-5, "Echo", "Cy", 130.0)],
+                )],
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_guest_stick_shows_its_branches_and_lists() {
+    let (_dir, lib) = open();
+    let (_disk, root) = disk();
+    let other = tempfile::tempdir().unwrap();
+    let other = dunce::canonicalize(other.path()).unwrap();
+    let mut b = browser(&lib, vec![drive("OJGUEST", &root), drive("Music", &other)]);
+    let view = b.set_guests(vec![guest_stick(&root)]).unwrap();
+    // The stick takes the place of its plain drive row; its folders are under "Files".
+    assert_eq!(
+        labels(&view),
+        [
+            "OJGUEST",
+            "Serato",
+            "OJ Serato A",
+            "OJ Serato B",
+            "rekordbox (xml)",
+            "OJ Rekordbox",
+            "Files",
+            "Music",
+            "Playlists",
+        ]
+    );
+    let kinds: Vec<TreeKind> = view.tree.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds[..8],
+        [
+            TreeKind::GuestStick,
+            TreeKind::GuestBranch,
+            TreeKind::GuestList,
+            TreeKind::GuestList,
+            TreeKind::GuestBranch,
+            TreeKind::GuestList,
+            TreeKind::Folder,
+            TreeKind::Drive,
+        ]
+    );
+    assert_eq!(
+        view.tree[4].note.as_deref(),
+        Some("2 tracks could not be read")
+    );
+    assert!(view.tree[1].note.is_none());
+    // The stick's own folders open under Files, and nothing there is deletable.
+    assert!(view.tree[6].path.is_none());
+    let view = b.edit(BrowserEdit::ToggleTreeAt(6)).unwrap();
+    assert_eq!(view.tree[7].label, "A");
+    // A list shows its rows; the playlist stays None so playlist edits never aim at it.
+    let view = b.edit(BrowserEdit::SelectTree(2)).unwrap();
+    assert_eq!(view.path, "OJGUEST ▸ Serato ▸ OJ Serato A");
+    assert_eq!(view.list_count, 3);
+    assert_eq!(view.playlist, None);
+    assert_eq!(view.list_seconds, Some(0.0));
+    // The Serato row and the stick row list nothing.
+    assert_eq!(b.edit(BrowserEdit::SelectTree(1)).unwrap().list_count, 0);
+    assert_eq!(b.edit(BrowserEdit::SelectTree(0)).unwrap().list_count, 0);
+}
+
+#[test]
+fn a_guest_list_keeps_its_order_and_searches() {
+    let (_dir, lib) = open();
+    let (_disk, root) = disk();
+    let mut b = browser(&lib, vec![drive("OJGUEST", &root)]);
+    b.set_guests(vec![guest_stick(&root)]).unwrap();
+    let view = b.edit(BrowserEdit::SelectTree(2)).unwrap();
+    // The stick's own order, ids below zero.
+    assert_eq!(titles(&view), ["Sunrise", "Afterglow", "Bassline"]);
+    assert!(view.list.iter().all(|r| r.track.as_ref().unwrap().id < 0));
+    assert_eq!(b.list_track_ids().unwrap(), [-3, -1, -2]);
+    let view = search(&mut b, Some("AMY"), 1);
+    assert_eq!(titles(&view), ["Afterglow"]);
+    assert_eq!(view.list_count, 1);
+    assert_eq!(search(&mut b, None, 2).list_count, 3);
+    let view = sort(&mut b, Some(TrackSortKey::Bpm), true, 3);
+    assert_eq!(titles(&view), ["Afterglow", "Sunrise", "Bassline"]);
+    let view = sort(&mut b, Some(TrackSortKey::Title), false, 4);
+    assert_eq!(titles(&view), ["Afterglow", "Bassline", "Sunrise"]);
+    // A search stays set for the next list.
+    let view = search(&mut b, Some("deep"), 5);
+    assert_eq!(view.list_count, 0);
+    let view = b.edit(BrowserEdit::SelectTree(3)).unwrap();
+    assert_eq!(titles(&view), ["Deep Night"]);
+}
+
+#[test]
+fn removing_the_stick_moves_the_highlight_off_it() {
+    let (_dir, lib) = open();
+    let (_disk, root) = disk();
+    let mut b = browser(&lib, vec![drive("OJGUEST", &root)]);
+    b.set_guests(vec![guest_stick(&root)]).unwrap();
+    let view = b.edit(BrowserEdit::SelectTree(3)).unwrap();
+    assert_eq!(view.path, "OJGUEST ▸ Serato ▸ OJ Serato B");
+    // Another list of the same stick goes: the highlight follows its list by name.
+    let mut fewer = guest_stick(&root);
+    fewer.branches[0].lists.remove(0);
+    let view = b.set_guests(vec![fewer]).unwrap();
+    assert_eq!(view.path, "OJGUEST ▸ Serato ▸ OJ Serato B");
+    assert_eq!(titles(&view), ["Deep Night"]);
+    // The stick goes: the drive is plain again and the highlight is on a row that is
+    // still there, with its own list.
+    let view = b.set_guests(Vec::new()).unwrap();
+    assert_eq!(labels(&view), ["OJGUEST", "Playlists"]);
+    assert_eq!(view.tree[view.tree_cursor].kind, TreeKind::Drive);
+    assert_eq!(view.list_count, 0);
+    assert!(view.list.is_empty());
 }

@@ -425,9 +425,10 @@ impl LibraryMode {
     ///
     /// # Errors
     ///
-    /// Why the write cannot be asked for (the worker stopped). A failed write is
-    /// reported as an event.
+    /// Why the write cannot be asked for (the worker stopped, or a track is a guest
+    /// stick's). A failed write is reported as an event.
     pub fn add_to_playlist(&self, playlist: i64, tracks: &[i64]) -> Result<(), String> {
+        playlist_edits::refuse_guests(tracks)?;
         self.try_send_job(Job::EditPlaylist(playlist_edits::append(playlist, tracks)))
     }
 
@@ -2054,6 +2055,16 @@ mod tests {
         );
         assert_eq!(targets(grid_commands(8, None, &loaded)), [(1, None)]);
         assert_eq!(targets(grid_commands(9, grid, &loaded)), []);
+    }
+
+    #[test]
+    fn dropping_a_guest_row_on_a_playlist_is_refused() {
+        let (_dir, mode, _engine, _printer) = mode();
+        let refused = Err("Guest tracks can't be added to your playlists".to_owned());
+        assert_eq!(mode.add_to_playlist(1, &[-3]), refused);
+        // Mixed with a library track, nothing goes.
+        assert_eq!(mode.add_to_playlist(1, &[4, -3]), refused);
+        assert_eq!(mode.add_to_playlist(1, &[4]), Ok(()));
     }
 
     #[test]

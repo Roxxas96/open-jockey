@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use library::{BrowserView, Focus};
+use library::{BrowserView, Focus, TreeKind, TreeRow};
 use ui::footer::eta_text;
 use ui::{ControlFrame, EVENT_SHOWN, JobKind, JobOp, JobState, JobView, UiCommand, ViewState};
 
@@ -35,6 +35,28 @@ fn browser(count: usize, seconds: Option<f64>) -> BrowserView {
         seq: 0,
         playlist: seconds.map(|_| 1),
     }
+}
+
+#[test]
+fn the_footer_reads_a_guest_list_like_a_playlist() {
+    let mut view = browser(12, Some(3_600.0));
+    view.path = "OJGUEST ▸ Serato ▸ OJ Serato A".into();
+    // The browser holds no playlist for a guest list; its tree row says what it is.
+    view.playlist = None;
+    view.tree = vec![TreeRow {
+        label: "OJ Serato A".into(),
+        depth: 2,
+        kind: TreeKind::GuestList,
+        expanded: false,
+        note: None,
+        playlist: None,
+        path: None,
+    }];
+    let (h, _) = full(ControlFrame {
+        browser: Some(view),
+        ..ControlFrame::default()
+    });
+    h.get_by_label("OJ Serato A · 12 tracks · 1 h");
 }
 
 fn job(kind: JobKind, label: &str) -> JobView {
