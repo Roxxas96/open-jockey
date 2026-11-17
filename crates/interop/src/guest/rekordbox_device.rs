@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 use super::anlz::{AnlzData, read_anlz};
 use super::pdb::{NodeRow, PdbLibrary, read_pdb};
@@ -94,7 +95,9 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
         ids.insert(row.id, source.tracks.len());
         source.tracks.push(track);
     }
-    source.playlists = playlists(&library, &ids);
+    let (lists, too_many) = playlists(&library, &ids);
+    source.playlists = lists;
+    counts.too_many_playlists = too_many;
     counts.truncated = library.truncated;
     source.problem = counts.problem();
     Some(source)
@@ -108,6 +111,8 @@ struct Counts {
     anlz_unreadable: usize,
     /// The pdb held more rows than are read.
     truncated: bool,
+    /// A cap stopped the playlists.
+    too_many_playlists: bool,
 }
 
 impl Counts {
@@ -133,6 +138,9 @@ impl Counts {
         }
         if self.truncated {
             out.push("export.pdb holds more rows than are read".into());
+        }
+        if self.too_many_playlists {
+            out.push("this stick has too many playlists to show".into());
         }
         (!out.is_empty()).then(|| out.join("; "))
     }
@@ -182,10 +190,26 @@ fn stick_path(root: &Path, stored: &str) -> Option<PathBuf> {
 
 /// The deepest folder nesting followed.
 const MAX_DEPTH: usize = 32;
+/// The most playlists built, and the most bytes their names take together.
+const MAX_PLAYLISTS: usize = 10_000;
+const MAX_NAME_BYTES: usize = 32 * 1024 * 1024;
+/// The longest flattened name, in characters.
+const MAX_NAME_CHARS: usize = 1024;
+
+/// `prefix / name`, cut to the longest name kept.
+fn join_name(prefix: &str, name: &str) -> String {
+    let joined = if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix} / {name}")
+    };
+    joined.chars().take(MAX_NAME_CHARS).collect()
+}
 
 /// The playlists of the tree in tree order (each folder's children by `sort_order`, folders
-/// before what follows them), each named `Folder / Playlist`, with their tracks in order.
-fn playlists(library: &PdbLibrary, ids: &HashMap<u32, usize>) -> Vec<GuestPlaylist> {
+/// before what follows them), each named `Folder / Playlist`, with their tracks in order. The
+/// flag is set when a cap stopped the build.
+fn playlists(library: &PdbLibrary, ids: &HashMap<u32, usize>) -> (Vec<GuestPlaylist>, bool) {
     let known: HashSet<u32> = library.nodes.iter().map(|n| n.id).collect();
     // Children by parent; a node whose parent is not in the tree hangs off the root (0).
     let mut children: HashMap<u32, Vec<&NodeRow>> = HashMap::new();
@@ -205,38 +229,46 @@ fn playlists(library: &PdbLibrary, ids: &HashMap<u32, usize>) -> Vec<GuestPlayli
         entries.entry(list).or_default().push((index, track));
     }
     let mut lists = Vec::new();
+    let mut name_bytes = 0usize;
+    let mut capped = false;
     let mut visited = HashSet::new();
-    // Depth-first with an explicit stack: nodes still to visit, with the folder names above.
-    let mut stack: Vec<(&NodeRow, Vec<&str>)> = children
+    // Depth-first with an explicit stack: a node still to visit, its depth and the flattened
+    // name of the folders above it (built once per folder and shared by its children).
+    let mut stack: Vec<(&NodeRow, usize, Rc<str>)> = children
         .get(&0)
         .into_iter()
         .flatten()
         .rev()
-        .map(|&n| (n, Vec::new()))
+        .map(|&n| (n, 0, Rc::from("")))
         .collect();
-    while let Some((node, above)) = stack.pop() {
+    while let Some((node, depth, prefix)) = stack.pop() {
         if !visited.insert(node.id) {
             continue;
         }
-        let mut names = above;
-        names.push(node.name.as_str());
         if node.is_playlist {
+            let name = join_name(&prefix, &node.name);
+            name_bytes += name.len();
+            if lists.len() >= MAX_PLAYLISTS || name_bytes > MAX_NAME_BYTES {
+                capped = true;
+                break;
+            }
             let mut rows = entries.remove(&node.id).unwrap_or_default();
             rows.sort_by_key(|&(index, _)| index);
             lists.push(GuestPlaylist {
-                name: names.join(" / "),
+                name,
                 tracks: rows
                     .into_iter()
                     .filter_map(|(_, track)| ids.get(&track).copied())
                     .collect(),
             });
-        } else if names.len() < MAX_DEPTH {
+        } else if depth + 1 < MAX_DEPTH {
+            let below: Rc<str> = Rc::from(join_name(&prefix, &node.name));
             for &child in children.get(&node.id).into_iter().flatten().rev() {
-                stack.push((child, names.clone()));
+                stack.push((child, depth + 1, Rc::clone(&below)));
             }
         }
     }
-    lists
+    (lists, capped)
 }
 
 #[cfg(test)]
@@ -279,10 +311,30 @@ mod tests {
             ..PdbLibrary::default()
         };
         let ids = HashMap::from([(10, 0), (11, 1), (12, 2)]);
-        let lists = playlists(&library, &ids);
+        let (lists, capped) = playlists(&library, &ids);
+        assert!(!capped);
         let names: Vec<&str> = lists.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["A / x", "A / y", "B / x", "B / y"]);
         assert_eq!(lists[0].tracks, [0, 1]);
         assert_eq!(lists[3].tracks, [2]);
+    }
+
+    #[test]
+    fn a_deep_chain_of_long_folder_names_stays_bounded() {
+        let mut nodes = Vec::new();
+        for id in 1..=31u32 {
+            nodes.push(node(id, id - 1, 0, &"x".repeat(4000), false));
+        }
+        for n in 0..20_000u32 {
+            nodes.push(node(100 + n, 31, n, "leaf", true));
+        }
+        let library = PdbLibrary {
+            nodes,
+            ..PdbLibrary::default()
+        };
+        let (lists, capped) = playlists(&library, &HashMap::new());
+        assert!(capped);
+        assert!(lists.len() <= 10_000);
+        assert!(lists.iter().all(|l| l.name.chars().count() <= 1024));
     }
 }
