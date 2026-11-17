@@ -2854,7 +2854,12 @@ mod tests {
         new_tracks(&mut mode, &[1, 2, 3], &mut engine, &printer);
         let line = mode.status_lines(&engine, &slots).remove(0);
         assert!(line.ends_with("analyzing 0/3 (paused)"), "{line}");
+        // Tracks 1 to 3 are not in the library: once resumed, the workers would fail all
+        // three at once and the pill would go. A limit of 0 holds the workers (it is not
+        // the user's pause), so the resumed queue still waits when the line is read.
+        mode.analyzer.as_ref().unwrap().set_max_active(0);
         mode.job(JobKind::Analysis, JobOp::Resume);
+        assert!(!mode.analyzer.as_ref().unwrap().paused());
         let line = mode.status_lines(&engine, &slots).remove(0);
         assert!(
             line.contains("analyzing 0/3") && !line.contains("paused"),
