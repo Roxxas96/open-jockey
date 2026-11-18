@@ -310,6 +310,9 @@ mod tests {
             lead_in: LeadIn {
                 gapless_header: false,
                 delay_frames: 0,
+                info_frame: false,
+                info_encoder: None,
+                frame_samples: 0,
             },
         }
     }

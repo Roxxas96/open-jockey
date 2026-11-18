@@ -61,6 +61,9 @@ mod tests {
             lead_in: LeadIn {
                 gapless_header,
                 delay_frames: 0,
+                info_frame: gapless_header,
+                info_encoder: None,
+                frame_samples: 0,
             },
         }
     }

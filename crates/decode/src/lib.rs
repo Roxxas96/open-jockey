@@ -1,5 +1,6 @@
 //! Audio file decoding into engine-ready sample buffers.
 
+mod mp3_header;
 mod mp4_trim;
 
 use std::fs::File;
@@ -121,6 +122,17 @@ fn probe(path: &Path) -> Result<Box<dyn FormatReader>, DecodeError> {
     Ok(format)
 }
 
+/// Which encoder wrote an MP3's Xing/Info frame, from the encoder string in its tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoEncoder {
+    /// "LAME…": LAME's own tag.
+    Lame,
+    /// "Lavc…": FFmpeg's libavcodec.
+    Lavc,
+    /// Another printable name.
+    Other,
+}
+
 /// What precedes an MP3's first audio sample in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LeadIn {
@@ -128,9 +140,16 @@ pub struct LeadIn {
     pub gapless_header: bool,
     /// Encoder delay in frames, trimmed when decoding; 0 when the file does not declare one.
     pub delay_frames: u32,
+    /// The first frame is a Xing or Info frame (a VBRI frame does not count).
+    pub info_frame: bool,
+    /// The encoder named in that frame's tag; `None` without one, or when it is unreadable.
+    pub info_encoder: Option<InfoEncoder>,
+    /// Samples per MP3 frame: 1152 for MPEG-1, 576 for MPEG-2 and 2.5; 0 when the file is
+    /// not an MP3, or no frame was found.
+    pub frame_samples: u32,
 }
 
-/// Reads `path`'s [`LeadIn`] by probing only; no audio is decoded.
+/// Reads `path`'s [`LeadIn`] by probing, plus an MP3's first frame; no audio is decoded.
 ///
 /// # Errors
 ///
@@ -140,9 +159,22 @@ pub fn lead_in(path: &Path) -> Result<LeadIn, DecodeError> {
     let track = format
         .default_track(TrackType::Audio)
         .ok_or(DecodeError::NoAudioTrack)?;
+    let is_mp3 = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .is_some_and(|p| p.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_MP3);
+    let frame = if is_mp3 {
+        mp3_header::first_frame(&mut File::open(path)?)
+    } else {
+        None
+    };
     Ok(LeadIn {
         gapless_header: track.delay.is_some(),
         delay_frames: track.delay.unwrap_or(0),
+        info_frame: frame.is_some_and(|f| f.info_frame),
+        info_encoder: frame.and_then(|f| f.info_encoder),
+        frame_samples: frame.map_or(0, |f| f.frame_samples),
     })
 }
 
