@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="7.2.19" Company="AlphaTheta"/>
+  <COLLECTION Entries="8">
+    <TRACK TrackID="61079715" Name="OJ Cal 07 lame 22k CBR" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="MP3 File" Size="486873" TotalTime="30"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00" DateAdded="2026-11-17"
+           BitRate="128" SampleRate="22050" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2007%20lame%2022k%20CBR.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.076" Bpm="120.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="6568252" Name="OJ Cal 01 ffmpeg 44k CBR" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="MP3 File" Size="1208055"
+           TotalTime="30" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00"
+           DateAdded="2026-11-17" BitRate="320" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2001%20ffmpeg%2044k%20CBR.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.024" Bpm="120.00" Metro="4/4" Battito="4"/>
+    </TRACK>
+    <TRACK TrackID="252713394" Name="OJ Cal 04 lame 44k VBR" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="MP3 File" Size="152406" TotalTime="30"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00" DateAdded="2026-11-17"
+           BitRate="0" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2004%20lame%2044k%20VBR.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.051" Bpm="120.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="27716387" Name="OJ Cal 03 lame 44k CBR" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="MP3 File" Size="1208061"
+           TotalTime="30" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00"
+           DateAdded="2026-11-17" BitRate="320" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2003%20lame%2044k%20CBR.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.051" Bpm="120.00" Metro="4/4" Battito="4"/>
+    </TRACK>
+    <TRACK TrackID="56479069" Name="OJ Cal 06 lame 48k CBR" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="MP3 File" Size="1207305"
+           TotalTime="30" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00"
+           DateAdded="2026-11-17" BitRate="320" SampleRate="48000" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2006%20lame%2048k%20CBR.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.046" Bpm="120.00" Metro="4/4" Battito="4"/>
+    </TRACK>
+    <TRACK TrackID="79861162" Name="OJ Cal 00 reference 44k" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="WAV File" Size="5297580"
+           TotalTime="29" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00"
+           DateAdded="2026-11-17" BitRate="1411" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2000%20reference%2044k.wav"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.001" Bpm="120.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="119519172" Name="OJ Cal 02 ffmpeg 44k no-Info" Artist=""
+           Composer="" Album="" Grouping="" Genre="" Kind="MP3 File" Size="1206919"
+           TotalTime="30" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00"
+           DateAdded="2026-11-17" BitRate="320" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2002%20ffmpeg%2044k%20no-Info.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.024" Bpm="120.00" Metro="4/4" Battito="4"/>
+    </TRACK>
+    <TRACK TrackID="35621791" Name="OJ Cal 05 lame 44k no-Info" Artist=""
+           Composer="" Album="" Grouping="" Genre="" Kind="MP3 File" Size="1207014"
+           TotalTime="30" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="120.00"
+           DateAdded="2026-11-17" BitRate="320" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Volumes/OJCAL/OJ%20Cal%2005%20lame%2044k%20no-Info.mp3"
+           Remixer="" Tonality="Bm" Label="" Mix="">
+      <TEMPO Inizio="0.024" Bpm="120.00" Metro="4/4" Battito="4"/>
+    </TRACK>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="1">
+      <NODE Name="Test" Type="1" KeyType="0" Entries="8">
+        <TRACK Key="61079715"/>
+        <TRACK Key="6568252"/>
+        <TRACK Key="252713394"/>
+        <TRACK Key="27716387"/>
+        <TRACK Key="56479069"/>
+        <TRACK Key="79861162"/>
+        <TRACK Key="119519172"/>
+        <TRACK Key="35621791"/>
+      </NODE>
+    </NODE>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>
