@@ -5,8 +5,9 @@ default_install_hook_types:
   - pre-commit
   - pre-push
 
-# Files other DJ apps wrote, kept byte for byte as the readers' fixtures (11b).
-exclude: '^crates/interop/tests/fixtures/guest/(?!README\.md$)'
+# Files other DJ apps wrote, kept byte for byte as the readers' fixtures (11b, and the OJCAL
+# calibration stick).
+exclude: '^crates/interop/tests/fixtures/(guest|ojcal)/(?!README\.md$)'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
