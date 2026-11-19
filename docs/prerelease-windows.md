@@ -8,6 +8,8 @@ This is a pre-release for testing, not a release. It is unsigned and has no inst
 2. Double-click `Start FLX4.bat` or `Start GRV6.bat`, for the controller you plugged in.
 3. Windows SmartScreen says "Windows protected your PC". Click **More info**, then **Run anyway**.
    It asks once.
+4. If Windows says `VCRUNTIME140.dll` or `MSVCP140.dll` was not found, install Microsoft's
+   "Visual C++ Redistributable" (x64, from microsoft.com), then start again.
 
 Each `.bat` file starts Open Jockey with the configuration file next to it (`config-flx4.toml` or
 `config-grv6.toml`), which picks that controller's mapping from the `controllers` folder.
