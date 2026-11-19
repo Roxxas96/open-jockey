@@ -1,0 +1,1398 @@
+# Draft mapping for the Pioneer DDJ-GRV6.
+#
+# DRAFT, to be confirmed by a capture (controllers/ddj-grv6/checklist.toml with
+# `open-jockey midi capture`). Every MIDI value below comes from Pioneer's official list,
+# "DDJ-GRV6 MIDI Message List" E1 (DDJ-GRV6_MIDI_Message_List_E1.pdf, AlphaTheta, 2024),
+# and from nowhere else. Behavior follows VirtualDJ's default layout for this controller,
+# limited to the actions Open Jockey has; where that is unclear, the DDJ-SB3 mapping's choice
+# for the same physical control. Controls for features Open Jockey lacks stay unbound and
+# are listed at the end.
+# Channels are 1-based: status 0x90/0xB0 is channel 1 ... 0x96/0xB6 channel 7.
+#
+# Layering decision: HARDWARE layering.
+# Evidence: the list's channel table gives "CH 1, DECK 1" to "CH 4, DECK 4" their own MIDI
+# channels 1-4 (status 9n/Bn with n = 0-3), and every deck and mixer row is listed for
+# "1/2/3/4". The DECK 1-4 buttons switch the controller itself: DECK 3 sends note 0x3C
+# with 0x00 on channel 1 ("Deck 1 control off") and 0x7F on channel 3 ("Deck 3 control
+# on"). Performance pads have their own channels per deck: 8/10/12/14 for decks 1-4
+# without SHIFT, 9/11/13/15 with SHIFT. So every deck binding names its `deck`, and the
+# DECK buttons stay unbound: the controller already sends on the right channel, and
+# `side.deck_toggle` would only flip the window's view out of step with it.
+#
+# SHIFT: the list gives every shifted button its own note (CUE 0x0C, SHIFT + CUE 0x48;
+# PLAY 0x0B, SHIFT + PLAY 0x47), shifted jog moves their own CCs (platter 0x29, wheel side
+# 0x26), shifted pads their own channels and the shifted TEMPO slider its own cc14
+# (0x05/0x25). So, as on the SB3, shifted functions bind to the shifted message and need
+# no `shift` condition. SHIFT itself (note 0x3F) is still bound to `modifier.shift`.
+#
+# Pads: each hardware pad mode sends its own note bank (Hot Cue 0x00-0x07, Stems
+# 0x10-0x17, Beat Jump 0x20-0x27, Sampler 0x30-0x37, Keyboard 0x40-0x47, Pad FX
+# 0x50-0x57, Beat Loop 0x60-0x67, Key Shift 0x70-0x77), with the same notes on the SHIFT
+# channel. The notes alone say which mode a pad press is in, so the pad bindings need
+# no `pad_mode`. Which mode button (or SHIFT + mode button) selects which bank is not in
+# the list: the capture confirms it.
+
+[controller]
+name = "Pioneer DDJ-GRV6"
+port = "DDJ-GRV6"
+# Pioneer's list does not give the jog resolution (it only says the jog sends the step
+# count since the last message, 65 and up clockwise, 63 and down counter-clockwise).
+# 720 steps per turn is an estimate, the SB3's value; tune it after the capture.
+jog_steps_per_turn = 720
+
+# MASTER LEVEL (cc14 ch7 0x08/0x28) and HEADPHONES LEVEL (cc14 ch7 0x0D/0x2D) are
+# assumed to be applied by the GRV6's own audio interface, as on the SB3: the software
+# levels stay at full and the knobs are left unbound.
+[[init]]
+action = "master.level"
+value = 1.0
+
+[[init]]
+action = "master.headphone_level"
+value = 1.0
+
+# Every channel fader starts closed, so no deck sounds until its fader is touched (soft
+# takeover starts disarmed when the controller attaches; see the SB3 mapping).
+
+[[init]]
+action = "channel.fader"
+deck = 1
+value = 0.0
+
+[[init]]
+action = "channel.fader"
+deck = 2
+value = 0.0
+
+[[init]]
+action = "channel.fader"
+deck = 3
+value = 0.0
+
+[[init]]
+action = "channel.fader"
+deck = 4
+value = 0.0
+
+# ------------------------------------------------------------ deck 1 (left side, channel 1)
+
+# SHIFT
+[[input]]
+midi = { channel = 1, note = 0x3F }
+action = "modifier.shift"
+side = "left"
+
+# PLAY/PAUSE (SHIFT + PLAY/PAUSE, note 0x47, stays unbound as on the SB3)
+[[input]]
+midi = { channel = 1, note = 0x0B }
+action = "deck.play_pause"
+deck = 1
+
+# CUE
+[[input]]
+midi = { channel = 1, note = 0x0C }
+action = "deck.cue"
+deck = 1
+
+# SHIFT + CUE
+[[input]]
+midi = { channel = 1, note = 0x48 }
+action = "deck.return_to_start"
+deck = 1
+
+# BEAT SYNC (SHIFT + BEAT SYNC, note 0x5C, stays unbound as on the SB3)
+[[input]]
+midi = { channel = 1, note = 0x58 }
+action = "deck.sync"
+deck = 1
+
+# MASTER TEMPO (key lock)
+[[input]]
+midi = { channel = 1, note = 0x1A }
+action = "deck.keylock_toggle"
+deck = 1
+
+# SHIFT + MASTER TEMPO: tempo range, as SHIFT + KEY LOCK on the SB3
+[[input]]
+midi = { channel = 1, note = 0x60 }
+action = "deck.tempo_range_next"
+deck = 1
+
+# TEMPO: Pioneer's list puts Min (0x00/0x00) at the "-" side and Max at the "+" side,
+# so the value is not inverted (1 is faster). Confirm the direction in the capture.
+[[input]]
+midi = { channel = 1, cc14 = [0x00, 0x20] }
+action = "deck.tempo"
+deck = 1
+
+# SHIFT + TEMPO: the slider sends its position on 0x05/0x25 while SHIFT is held; bound
+# to the same tempo so moving it with SHIFT held still works (soft takeover re-arms
+# the other message).
+[[input]]
+midi = { channel = 1, cc14 = [0x05, 0x25] }
+action = "deck.tempo"
+deck = 1
+
+# SLIP
+[[input]]
+midi = { channel = 1, note = 0x40 }
+action = "deck.slip_toggle"
+deck = 1
+
+# SHIFT + SLIP sends 0x17, the SB3's VINYL note: vinyl mode on or off (the GRV6 has no
+# VINYL button).
+[[input]]
+midi = { channel = 1, note = 0x17 }
+action = "deck.vinyl_toggle"
+deck = 1
+
+# IN / 4 BEAT: loop in
+[[input]]
+midi = { channel = 1, note = 0x10 }
+action = "deck.loop_in"
+deck = 1
+
+# IN / 4 BEAT long press (note 0x14, listed as its own message): a 4-beat loop. The
+# press first sends 0x10 (loop in, which only clears an old loop), then this.
+[[input]]
+midi = { channel = 1, note = 0x14 }
+action = "deck.auto_loop"
+deck = 1
+
+# OUT: loop out
+[[input]]
+midi = { channel = 1, note = 0x11 }
+action = "deck.loop_out"
+deck = 1
+
+# RELOOP / EXIT
+[[input]]
+midi = { channel = 1, note = 0x4D }
+action = "deck.reloop_exit"
+deck = 1
+
+# CUE/LOOP CALL left and right: halve and double the loop (what they do to an active
+# loop; Open Jockey has no memory cues to call).
+[[input]]
+midi = { channel = 1, note = 0x51 }
+action = "deck.loop_halve"
+deck = 1
+
+[[input]]
+midi = { channel = 1, note = 0x53 }
+action = "deck.loop_double"
+deck = 1
+
+# JOG platter touched or released
+[[input]]
+midi = { channel = 1, note = 0x36 }
+action = "deck.jog_touch"
+deck = 1
+
+# SHIFT + JOG touch: only lets go (see the SB3 mapping)
+[[input]]
+midi = { channel = 1, note = 0x67 }
+action = "deck.jog_release"
+deck = 1
+
+# JOG platter: Pioneer lists 0x22 with "Vinyl on" and 0x23 with "Vinyl off" (the
+# controller's own vinyl state). Both drive the top of the jog; the app's vinyl mode
+# (SHIFT + SLIP above) decides whether a touched platter scratches.
+[[input]]
+midi = { channel = 1, cc = 0x22 }
+action = "deck.jog_top"
+deck = 1
+value = "relative_offset"
+
+[[input]]
+midi = { channel = 1, cc = 0x23 }
+action = "deck.jog_top"
+deck = 1
+value = "relative_offset"
+
+# JOG wheel side
+[[input]]
+midi = { channel = 1, cc = 0x21 }
+action = "deck.jog_ring"
+deck = 1
+value = "relative_offset"
+
+# SHIFT + JOG platter: fast search
+[[input]]
+midi = { channel = 1, cc = 0x29 }
+action = "deck.jog_search"
+deck = 1
+value = "relative_offset"
+
+# SHIFT + JOG wheel side: fast search
+[[input]]
+midi = { channel = 1, cc = 0x26 }
+action = "deck.jog_search"
+deck = 1
+value = "relative_offset"
+
+# Mixer: TRIM
+[[input]]
+midi = { channel = 1, cc14 = [0x04, 0x24] }
+action = "channel.trim"
+deck = 1
+
+# EQ HI
+[[input]]
+midi = { channel = 1, cc14 = [0x07, 0x27] }
+action = "channel.eq_high"
+deck = 1
+
+# EQ MID
+[[input]]
+midi = { channel = 1, cc14 = [0x0B, 0x2B] }
+action = "channel.eq_mid"
+deck = 1
+
+# EQ LOW
+[[input]]
+midi = { channel = 1, cc14 = [0x0F, 0x2F] }
+action = "channel.eq_low"
+deck = 1
+
+# SOUND COLOR FX (CH 1) knob, channel 7: the filter, as the SB3's FILTER knob on the
+# same messages
+[[input]]
+midi = { channel = 7, cc14 = [0x17, 0x37] }
+action = "channel.filter"
+deck = 1
+
+# CH FADER
+[[input]]
+midi = { channel = 1, cc14 = [0x13, 0x33] }
+action = "channel.fader"
+deck = 1
+
+# CH CUE (headphone cue)
+[[input]]
+midi = { channel = 1, note = 0x54 }
+action = "channel.pfl_toggle"
+deck = 1
+
+# Pad mode buttons. The pads send a different bank per mode, so these only tell the
+# window which mode the side shows. SHIFT variants (0x69, 0x6B, 0x6D, 0x6F) and SAMPLER's
+# long press (0x79) stay unbound until the capture shows which bank they select.
+
+# HOT CUE MODE
+[[input]]
+midi = { channel = 1, note = 0x1B }
+action = "pads.mode_hot_cue"
+side = "left"
+
+# STEMS MODE
+[[input]]
+midi = { channel = 1, note = 0x1E }
+action = "pads.mode_hardware"
+side = "left"
+
+# BEAT JUMP MODE
+[[input]]
+midi = { channel = 1, note = 0x20 }
+action = "pads.mode_hardware"
+side = "left"
+
+# SAMPLER MODE
+[[input]]
+midi = { channel = 1, note = 0x22 }
+action = "pads.mode_sampler"
+side = "left"
+
+# Pads, channel 8 (SHIFT: channel 9). Hot Cue mode: set or jump to hotcues; with SHIFT, delete them
+[[input]]
+midi = { channel = 8, notes = [0x00, 0x07] }
+action = "deck.hotcue_{n}"
+deck = 1
+
+[[input]]
+midi = { channel = 9, notes = [0x00, 0x07] }
+action = "deck.hotcue_delete_{n}"
+deck = 1
+
+# Stems mode, pads 1-4: vocals, instruments, bass, rhythm (drums) on and off. Pads
+# 5-8 and SHIFT stay unbound until the capture and VirtualDJ's layout say more.
+[[input]]
+midi = { channel = 8, note = 0x10 }
+action = "deck.stem_toggle_vocals"
+deck = 1
+
+[[input]]
+midi = { channel = 8, note = 0x11 }
+action = "deck.stem_toggle_instruments"
+deck = 1
+
+[[input]]
+midi = { channel = 8, note = 0x12 }
+action = "deck.stem_toggle_bass"
+deck = 1
+
+[[input]]
+midi = { channel = 8, note = 0x13 }
+action = "deck.stem_toggle_rhythm"
+deck = 1
+
+# Beat Jump mode (SHIFT: the shifted jump sizes)
+[[input]]
+midi = { channel = 8, notes = [0x20, 0x27] }
+action = "deck.beat_jump_{n}"
+deck = 1
+
+[[input]]
+midi = { channel = 9, notes = [0x20, 0x27] }
+action = "deck.beat_jump_shift_{n}"
+deck = 1
+
+# Sampler mode: play samples; with SHIFT, stop them (the sampler is shared by all decks)
+[[input]]
+midi = { channel = 8, notes = [0x30, 0x37] }
+action = "sampler.play_{n}"
+
+[[input]]
+midi = { channel = 9, notes = [0x30, 0x37] }
+action = "sampler.stop_{n}"
+
+# Beat Loop mode: Open Jockey has no "loop of N beats" toggle, so the pads hold a loop
+# roll of the pad's size instead (released, the track goes on). Bound on the SHIFT
+# channel too, so a release after SHIFT went down still ends the roll.
+[[input]]
+midi = { channel = 8, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 1
+
+[[input]]
+midi = { channel = 9, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 1
+
+# ------------------------------------------------------------ deck 2 (right side, channel 2)
+
+# SHIFT
+[[input]]
+midi = { channel = 2, note = 0x3F }
+action = "modifier.shift"
+side = "right"
+
+# PLAY/PAUSE
+[[input]]
+midi = { channel = 2, note = 0x0B }
+action = "deck.play_pause"
+deck = 2
+
+# CUE
+[[input]]
+midi = { channel = 2, note = 0x0C }
+action = "deck.cue"
+deck = 2
+
+# SHIFT + CUE
+[[input]]
+midi = { channel = 2, note = 0x48 }
+action = "deck.return_to_start"
+deck = 2
+
+# BEAT SYNC
+[[input]]
+midi = { channel = 2, note = 0x58 }
+action = "deck.sync"
+deck = 2
+
+# MASTER TEMPO (key lock)
+[[input]]
+midi = { channel = 2, note = 0x1A }
+action = "deck.keylock_toggle"
+deck = 2
+
+# SHIFT + MASTER TEMPO: tempo range, as SHIFT + KEY LOCK on the SB3
+[[input]]
+midi = { channel = 2, note = 0x60 }
+action = "deck.tempo_range_next"
+deck = 2
+
+# TEMPO
+[[input]]
+midi = { channel = 2, cc14 = [0x00, 0x20] }
+action = "deck.tempo"
+deck = 2
+
+# SHIFT + TEMPO
+[[input]]
+midi = { channel = 2, cc14 = [0x05, 0x25] }
+action = "deck.tempo"
+deck = 2
+
+# SLIP
+[[input]]
+midi = { channel = 2, note = 0x40 }
+action = "deck.slip_toggle"
+deck = 2
+
+# SHIFT + SLIP: vinyl mode
+[[input]]
+midi = { channel = 2, note = 0x17 }
+action = "deck.vinyl_toggle"
+deck = 2
+
+# IN / 4 BEAT: loop in
+[[input]]
+midi = { channel = 2, note = 0x10 }
+action = "deck.loop_in"
+deck = 2
+
+# IN / 4 BEAT long press: 4-beat loop
+[[input]]
+midi = { channel = 2, note = 0x14 }
+action = "deck.auto_loop"
+deck = 2
+
+# OUT: loop out
+[[input]]
+midi = { channel = 2, note = 0x11 }
+action = "deck.loop_out"
+deck = 2
+
+# RELOOP / EXIT
+[[input]]
+midi = { channel = 2, note = 0x4D }
+action = "deck.reloop_exit"
+deck = 2
+
+# CUE/LOOP CALL left: loop halve
+[[input]]
+midi = { channel = 2, note = 0x51 }
+action = "deck.loop_halve"
+deck = 2
+
+# CUE/LOOP CALL right: loop double
+[[input]]
+midi = { channel = 2, note = 0x53 }
+action = "deck.loop_double"
+deck = 2
+
+# JOG platter touched or released
+[[input]]
+midi = { channel = 2, note = 0x36 }
+action = "deck.jog_touch"
+deck = 2
+
+# SHIFT + JOG touch: only lets go (see the SB3 mapping)
+[[input]]
+midi = { channel = 2, note = 0x67 }
+action = "deck.jog_release"
+deck = 2
+
+# JOG platter (vinyl on / vinyl off)
+[[input]]
+midi = { channel = 2, cc = 0x22 }
+action = "deck.jog_top"
+deck = 2
+value = "relative_offset"
+
+[[input]]
+midi = { channel = 2, cc = 0x23 }
+action = "deck.jog_top"
+deck = 2
+value = "relative_offset"
+
+# JOG wheel side
+[[input]]
+midi = { channel = 2, cc = 0x21 }
+action = "deck.jog_ring"
+deck = 2
+value = "relative_offset"
+
+# SHIFT + JOG platter: fast search
+[[input]]
+midi = { channel = 2, cc = 0x29 }
+action = "deck.jog_search"
+deck = 2
+value = "relative_offset"
+
+# SHIFT + JOG wheel side: fast search
+[[input]]
+midi = { channel = 2, cc = 0x26 }
+action = "deck.jog_search"
+deck = 2
+value = "relative_offset"
+
+# Mixer: TRIM
+[[input]]
+midi = { channel = 2, cc14 = [0x04, 0x24] }
+action = "channel.trim"
+deck = 2
+
+# EQ HI
+[[input]]
+midi = { channel = 2, cc14 = [0x07, 0x27] }
+action = "channel.eq_high"
+deck = 2
+
+# EQ MID
+[[input]]
+midi = { channel = 2, cc14 = [0x0B, 0x2B] }
+action = "channel.eq_mid"
+deck = 2
+
+# EQ LOW
+[[input]]
+midi = { channel = 2, cc14 = [0x0F, 0x2F] }
+action = "channel.eq_low"
+deck = 2
+
+# SOUND COLOR FX (CH 2): filter
+[[input]]
+midi = { channel = 7, cc14 = [0x18, 0x38] }
+action = "channel.filter"
+deck = 2
+
+# CH FADER
+[[input]]
+midi = { channel = 2, cc14 = [0x13, 0x33] }
+action = "channel.fader"
+deck = 2
+
+# CH CUE (headphone cue)
+[[input]]
+midi = { channel = 2, note = 0x54 }
+action = "channel.pfl_toggle"
+deck = 2
+
+# HOT CUE MODE
+[[input]]
+midi = { channel = 2, note = 0x1B }
+action = "pads.mode_hot_cue"
+side = "right"
+
+# STEMS MODE
+[[input]]
+midi = { channel = 2, note = 0x1E }
+action = "pads.mode_hardware"
+side = "right"
+
+# BEAT JUMP MODE
+[[input]]
+midi = { channel = 2, note = 0x20 }
+action = "pads.mode_hardware"
+side = "right"
+
+# SAMPLER MODE
+[[input]]
+midi = { channel = 2, note = 0x22 }
+action = "pads.mode_sampler"
+side = "right"
+
+# Pads, channel 10 (SHIFT: channel 11). Hot Cue mode: set or jump to hotcues; with SHIFT, delete them
+[[input]]
+midi = { channel = 10, notes = [0x00, 0x07] }
+action = "deck.hotcue_{n}"
+deck = 2
+
+[[input]]
+midi = { channel = 11, notes = [0x00, 0x07] }
+action = "deck.hotcue_delete_{n}"
+deck = 2
+
+# Stems mode, pads 1-4
+[[input]]
+midi = { channel = 10, note = 0x10 }
+action = "deck.stem_toggle_vocals"
+deck = 2
+
+[[input]]
+midi = { channel = 10, note = 0x11 }
+action = "deck.stem_toggle_instruments"
+deck = 2
+
+[[input]]
+midi = { channel = 10, note = 0x12 }
+action = "deck.stem_toggle_bass"
+deck = 2
+
+[[input]]
+midi = { channel = 10, note = 0x13 }
+action = "deck.stem_toggle_rhythm"
+deck = 2
+
+# Beat Jump mode (SHIFT: the shifted jump sizes)
+[[input]]
+midi = { channel = 10, notes = [0x20, 0x27] }
+action = "deck.beat_jump_{n}"
+deck = 2
+
+[[input]]
+midi = { channel = 11, notes = [0x20, 0x27] }
+action = "deck.beat_jump_shift_{n}"
+deck = 2
+
+# Sampler mode: play samples; with SHIFT, stop them (the sampler is shared by all decks)
+[[input]]
+midi = { channel = 10, notes = [0x30, 0x37] }
+action = "sampler.play_{n}"
+
+[[input]]
+midi = { channel = 11, notes = [0x30, 0x37] }
+action = "sampler.stop_{n}"
+
+# Beat Loop mode: loop roll (also on the SHIFT channel)
+[[input]]
+midi = { channel = 10, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 2
+
+[[input]]
+midi = { channel = 11, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 2
+
+# ------------------------------------------------------------ deck 3 (left side, channel 3)
+
+# SHIFT
+[[input]]
+midi = { channel = 3, note = 0x3F }
+action = "modifier.shift"
+side = "left"
+
+# PLAY/PAUSE
+[[input]]
+midi = { channel = 3, note = 0x0B }
+action = "deck.play_pause"
+deck = 3
+
+# CUE
+[[input]]
+midi = { channel = 3, note = 0x0C }
+action = "deck.cue"
+deck = 3
+
+# SHIFT + CUE
+[[input]]
+midi = { channel = 3, note = 0x48 }
+action = "deck.return_to_start"
+deck = 3
+
+# BEAT SYNC
+[[input]]
+midi = { channel = 3, note = 0x58 }
+action = "deck.sync"
+deck = 3
+
+# MASTER TEMPO (key lock)
+[[input]]
+midi = { channel = 3, note = 0x1A }
+action = "deck.keylock_toggle"
+deck = 3
+
+# SHIFT + MASTER TEMPO: tempo range, as SHIFT + KEY LOCK on the SB3
+[[input]]
+midi = { channel = 3, note = 0x60 }
+action = "deck.tempo_range_next"
+deck = 3
+
+# TEMPO
+[[input]]
+midi = { channel = 3, cc14 = [0x00, 0x20] }
+action = "deck.tempo"
+deck = 3
+
+# SHIFT + TEMPO
+[[input]]
+midi = { channel = 3, cc14 = [0x05, 0x25] }
+action = "deck.tempo"
+deck = 3
+
+# SLIP
+[[input]]
+midi = { channel = 3, note = 0x40 }
+action = "deck.slip_toggle"
+deck = 3
+
+# SHIFT + SLIP: vinyl mode
+[[input]]
+midi = { channel = 3, note = 0x17 }
+action = "deck.vinyl_toggle"
+deck = 3
+
+# IN / 4 BEAT: loop in
+[[input]]
+midi = { channel = 3, note = 0x10 }
+action = "deck.loop_in"
+deck = 3
+
+# IN / 4 BEAT long press: 4-beat loop
+[[input]]
+midi = { channel = 3, note = 0x14 }
+action = "deck.auto_loop"
+deck = 3
+
+# OUT: loop out
+[[input]]
+midi = { channel = 3, note = 0x11 }
+action = "deck.loop_out"
+deck = 3
+
+# RELOOP / EXIT
+[[input]]
+midi = { channel = 3, note = 0x4D }
+action = "deck.reloop_exit"
+deck = 3
+
+# CUE/LOOP CALL left: loop halve
+[[input]]
+midi = { channel = 3, note = 0x51 }
+action = "deck.loop_halve"
+deck = 3
+
+# CUE/LOOP CALL right: loop double
+[[input]]
+midi = { channel = 3, note = 0x53 }
+action = "deck.loop_double"
+deck = 3
+
+# JOG platter touched or released
+[[input]]
+midi = { channel = 3, note = 0x36 }
+action = "deck.jog_touch"
+deck = 3
+
+# SHIFT + JOG touch: only lets go (see the SB3 mapping)
+[[input]]
+midi = { channel = 3, note = 0x67 }
+action = "deck.jog_release"
+deck = 3
+
+# JOG platter (vinyl on / vinyl off)
+[[input]]
+midi = { channel = 3, cc = 0x22 }
+action = "deck.jog_top"
+deck = 3
+value = "relative_offset"
+
+[[input]]
+midi = { channel = 3, cc = 0x23 }
+action = "deck.jog_top"
+deck = 3
+value = "relative_offset"
+
+# JOG wheel side
+[[input]]
+midi = { channel = 3, cc = 0x21 }
+action = "deck.jog_ring"
+deck = 3
+value = "relative_offset"
+
+# SHIFT + JOG platter: fast search
+[[input]]
+midi = { channel = 3, cc = 0x29 }
+action = "deck.jog_search"
+deck = 3
+value = "relative_offset"
+
+# SHIFT + JOG wheel side: fast search
+[[input]]
+midi = { channel = 3, cc = 0x26 }
+action = "deck.jog_search"
+deck = 3
+value = "relative_offset"
+
+# Mixer: TRIM
+[[input]]
+midi = { channel = 3, cc14 = [0x04, 0x24] }
+action = "channel.trim"
+deck = 3
+
+# EQ HI
+[[input]]
+midi = { channel = 3, cc14 = [0x07, 0x27] }
+action = "channel.eq_high"
+deck = 3
+
+# EQ MID
+[[input]]
+midi = { channel = 3, cc14 = [0x0B, 0x2B] }
+action = "channel.eq_mid"
+deck = 3
+
+# EQ LOW
+[[input]]
+midi = { channel = 3, cc14 = [0x0F, 0x2F] }
+action = "channel.eq_low"
+deck = 3
+
+# SOUND COLOR FX (CH 3): filter
+[[input]]
+midi = { channel = 7, cc14 = [0x19, 0x39] }
+action = "channel.filter"
+deck = 3
+
+# CH FADER
+[[input]]
+midi = { channel = 3, cc14 = [0x13, 0x33] }
+action = "channel.fader"
+deck = 3
+
+# CH CUE (headphone cue)
+[[input]]
+midi = { channel = 3, note = 0x54 }
+action = "channel.pfl_toggle"
+deck = 3
+
+# HOT CUE MODE
+[[input]]
+midi = { channel = 3, note = 0x1B }
+action = "pads.mode_hot_cue"
+side = "left"
+
+# STEMS MODE
+[[input]]
+midi = { channel = 3, note = 0x1E }
+action = "pads.mode_hardware"
+side = "left"
+
+# BEAT JUMP MODE
+[[input]]
+midi = { channel = 3, note = 0x20 }
+action = "pads.mode_hardware"
+side = "left"
+
+# SAMPLER MODE
+[[input]]
+midi = { channel = 3, note = 0x22 }
+action = "pads.mode_sampler"
+side = "left"
+
+# Pads, channel 12 (SHIFT: channel 13). Hot Cue mode: set or jump to hotcues; with SHIFT, delete them
+[[input]]
+midi = { channel = 12, notes = [0x00, 0x07] }
+action = "deck.hotcue_{n}"
+deck = 3
+
+[[input]]
+midi = { channel = 13, notes = [0x00, 0x07] }
+action = "deck.hotcue_delete_{n}"
+deck = 3
+
+# Stems mode, pads 1-4
+[[input]]
+midi = { channel = 12, note = 0x10 }
+action = "deck.stem_toggle_vocals"
+deck = 3
+
+[[input]]
+midi = { channel = 12, note = 0x11 }
+action = "deck.stem_toggle_instruments"
+deck = 3
+
+[[input]]
+midi = { channel = 12, note = 0x12 }
+action = "deck.stem_toggle_bass"
+deck = 3
+
+[[input]]
+midi = { channel = 12, note = 0x13 }
+action = "deck.stem_toggle_rhythm"
+deck = 3
+
+# Beat Jump mode (SHIFT: the shifted jump sizes)
+[[input]]
+midi = { channel = 12, notes = [0x20, 0x27] }
+action = "deck.beat_jump_{n}"
+deck = 3
+
+[[input]]
+midi = { channel = 13, notes = [0x20, 0x27] }
+action = "deck.beat_jump_shift_{n}"
+deck = 3
+
+# Sampler mode: play samples; with SHIFT, stop them (the sampler is shared by all decks)
+[[input]]
+midi = { channel = 12, notes = [0x30, 0x37] }
+action = "sampler.play_{n}"
+
+[[input]]
+midi = { channel = 13, notes = [0x30, 0x37] }
+action = "sampler.stop_{n}"
+
+# Beat Loop mode: loop roll (also on the SHIFT channel)
+[[input]]
+midi = { channel = 12, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 3
+
+[[input]]
+midi = { channel = 13, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 3
+
+# ------------------------------------------------------------ deck 4 (right side, channel 4)
+
+# SHIFT
+[[input]]
+midi = { channel = 4, note = 0x3F }
+action = "modifier.shift"
+side = "right"
+
+# PLAY/PAUSE
+[[input]]
+midi = { channel = 4, note = 0x0B }
+action = "deck.play_pause"
+deck = 4
+
+# CUE
+[[input]]
+midi = { channel = 4, note = 0x0C }
+action = "deck.cue"
+deck = 4
+
+# SHIFT + CUE
+[[input]]
+midi = { channel = 4, note = 0x48 }
+action = "deck.return_to_start"
+deck = 4
+
+# BEAT SYNC
+[[input]]
+midi = { channel = 4, note = 0x58 }
+action = "deck.sync"
+deck = 4
+
+# MASTER TEMPO (key lock)
+[[input]]
+midi = { channel = 4, note = 0x1A }
+action = "deck.keylock_toggle"
+deck = 4
+
+# SHIFT + MASTER TEMPO: tempo range, as SHIFT + KEY LOCK on the SB3
+[[input]]
+midi = { channel = 4, note = 0x60 }
+action = "deck.tempo_range_next"
+deck = 4
+
+# TEMPO
+[[input]]
+midi = { channel = 4, cc14 = [0x00, 0x20] }
+action = "deck.tempo"
+deck = 4
+
+# SHIFT + TEMPO
+[[input]]
+midi = { channel = 4, cc14 = [0x05, 0x25] }
+action = "deck.tempo"
+deck = 4
+
+# SLIP
+[[input]]
+midi = { channel = 4, note = 0x40 }
+action = "deck.slip_toggle"
+deck = 4
+
+# SHIFT + SLIP: vinyl mode
+[[input]]
+midi = { channel = 4, note = 0x17 }
+action = "deck.vinyl_toggle"
+deck = 4
+
+# IN / 4 BEAT: loop in
+[[input]]
+midi = { channel = 4, note = 0x10 }
+action = "deck.loop_in"
+deck = 4
+
+# IN / 4 BEAT long press: 4-beat loop
+[[input]]
+midi = { channel = 4, note = 0x14 }
+action = "deck.auto_loop"
+deck = 4
+
+# OUT: loop out
+[[input]]
+midi = { channel = 4, note = 0x11 }
+action = "deck.loop_out"
+deck = 4
+
+# RELOOP / EXIT
+[[input]]
+midi = { channel = 4, note = 0x4D }
+action = "deck.reloop_exit"
+deck = 4
+
+# CUE/LOOP CALL left: loop halve
+[[input]]
+midi = { channel = 4, note = 0x51 }
+action = "deck.loop_halve"
+deck = 4
+
+# CUE/LOOP CALL right: loop double
+[[input]]
+midi = { channel = 4, note = 0x53 }
+action = "deck.loop_double"
+deck = 4
+
+# JOG platter touched or released
+[[input]]
+midi = { channel = 4, note = 0x36 }
+action = "deck.jog_touch"
+deck = 4
+
+# SHIFT + JOG touch: only lets go (see the SB3 mapping)
+[[input]]
+midi = { channel = 4, note = 0x67 }
+action = "deck.jog_release"
+deck = 4
+
+# JOG platter (vinyl on / vinyl off)
+[[input]]
+midi = { channel = 4, cc = 0x22 }
+action = "deck.jog_top"
+deck = 4
+value = "relative_offset"
+
+[[input]]
+midi = { channel = 4, cc = 0x23 }
+action = "deck.jog_top"
+deck = 4
+value = "relative_offset"
+
+# JOG wheel side
+[[input]]
+midi = { channel = 4, cc = 0x21 }
+action = "deck.jog_ring"
+deck = 4
+value = "relative_offset"
+
+# SHIFT + JOG platter: fast search
+[[input]]
+midi = { channel = 4, cc = 0x29 }
+action = "deck.jog_search"
+deck = 4
+value = "relative_offset"
+
+# SHIFT + JOG wheel side: fast search
+[[input]]
+midi = { channel = 4, cc = 0x26 }
+action = "deck.jog_search"
+deck = 4
+value = "relative_offset"
+
+# Mixer: TRIM
+[[input]]
+midi = { channel = 4, cc14 = [0x04, 0x24] }
+action = "channel.trim"
+deck = 4
+
+# EQ HI
+[[input]]
+midi = { channel = 4, cc14 = [0x07, 0x27] }
+action = "channel.eq_high"
+deck = 4
+
+# EQ MID
+[[input]]
+midi = { channel = 4, cc14 = [0x0B, 0x2B] }
+action = "channel.eq_mid"
+deck = 4
+
+# EQ LOW
+[[input]]
+midi = { channel = 4, cc14 = [0x0F, 0x2F] }
+action = "channel.eq_low"
+deck = 4
+
+# SOUND COLOR FX (CH 4): filter
+[[input]]
+midi = { channel = 7, cc14 = [0x1A, 0x3A] }
+action = "channel.filter"
+deck = 4
+
+# CH FADER
+[[input]]
+midi = { channel = 4, cc14 = [0x13, 0x33] }
+action = "channel.fader"
+deck = 4
+
+# CH CUE (headphone cue)
+[[input]]
+midi = { channel = 4, note = 0x54 }
+action = "channel.pfl_toggle"
+deck = 4
+
+# HOT CUE MODE
+[[input]]
+midi = { channel = 4, note = 0x1B }
+action = "pads.mode_hot_cue"
+side = "right"
+
+# STEMS MODE
+[[input]]
+midi = { channel = 4, note = 0x1E }
+action = "pads.mode_hardware"
+side = "right"
+
+# BEAT JUMP MODE
+[[input]]
+midi = { channel = 4, note = 0x20 }
+action = "pads.mode_hardware"
+side = "right"
+
+# SAMPLER MODE
+[[input]]
+midi = { channel = 4, note = 0x22 }
+action = "pads.mode_sampler"
+side = "right"
+
+# Pads, channel 14 (SHIFT: channel 15). Hot Cue mode: set or jump to hotcues; with SHIFT, delete them
+[[input]]
+midi = { channel = 14, notes = [0x00, 0x07] }
+action = "deck.hotcue_{n}"
+deck = 4
+
+[[input]]
+midi = { channel = 15, notes = [0x00, 0x07] }
+action = "deck.hotcue_delete_{n}"
+deck = 4
+
+# Stems mode, pads 1-4
+[[input]]
+midi = { channel = 14, note = 0x10 }
+action = "deck.stem_toggle_vocals"
+deck = 4
+
+[[input]]
+midi = { channel = 14, note = 0x11 }
+action = "deck.stem_toggle_instruments"
+deck = 4
+
+[[input]]
+midi = { channel = 14, note = 0x12 }
+action = "deck.stem_toggle_bass"
+deck = 4
+
+[[input]]
+midi = { channel = 14, note = 0x13 }
+action = "deck.stem_toggle_rhythm"
+deck = 4
+
+# Beat Jump mode (SHIFT: the shifted jump sizes)
+[[input]]
+midi = { channel = 14, notes = [0x20, 0x27] }
+action = "deck.beat_jump_{n}"
+deck = 4
+
+[[input]]
+midi = { channel = 15, notes = [0x20, 0x27] }
+action = "deck.beat_jump_shift_{n}"
+deck = 4
+
+# Sampler mode: play samples; with SHIFT, stop them (the sampler is shared by all decks)
+[[input]]
+midi = { channel = 14, notes = [0x30, 0x37] }
+action = "sampler.play_{n}"
+
+[[input]]
+midi = { channel = 15, notes = [0x30, 0x37] }
+action = "sampler.stop_{n}"
+
+# Beat Loop mode: loop roll (also on the SHIFT channel)
+[[input]]
+midi = { channel = 14, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 4
+
+[[input]]
+midi = { channel = 15, notes = [0x60, 0x67] }
+action = "deck.loop_roll_{n}"
+deck = 4
+
+# ------------------------------------------------------------------- mixer, global (channel 7)
+
+# CROSSFADER: Min at the left side, Max at the right side
+[[input]]
+midi = { channel = 7, cc14 = [0x1F, 0x3F] }
+action = "master.crossfader"
+
+# HEADPHONES MIX (cc14 0x0C/0x2C): 0 is only the cue, 1 is only the master
+[[input]]
+midi = { channel = 7, cc14 = [0x0C, 0x2C] }
+action = "master.headphone_mix"
+
+# MASTER CUE: flips the headphones between all cue and all master, as the SB3's
+# headphone MASTER button. The list gives it no LED message.
+[[input]]
+midi = { channel = 7, note = 0x63 }
+action = "master.headphone_master_toggle"
+
+# --------------------------------------------------------------------------- browser (channel 7)
+
+# SMART ROTARY SELECTOR rotate: 1-30 clockwise, 127-98 counter-clockwise, so two's
+# complement steps, clockwise moving down the list
+[[input]]
+midi = { channel = 7, cc = 0x40 }
+action = "browser.scroll"
+value = "relative_twos"
+
+# SMART ROTARY SELECTOR press: switch between the tree and the track list
+[[input]]
+midi = { channel = 7, note = 0x41 }
+action = "browser.toggle_focus"
+
+# SHIFT + SMART ROTARY SELECTOR press: open or close the highlighted folder
+[[input]]
+midi = { channel = 7, note = 0x42 }
+action = "browser.toggle_folder"
+
+# LOAD 1
+[[input]]
+midi = { channel = 7, note = 0x46 }
+action = "deck.load_selected"
+deck = 1
+
+# LOAD 2
+[[input]]
+midi = { channel = 7, note = 0x47 }
+action = "deck.load_selected"
+deck = 2
+
+# LOAD 3
+[[input]]
+midi = { channel = 7, note = 0x48 }
+action = "deck.load_selected"
+deck = 3
+
+# LOAD 4
+[[input]]
+midi = { channel = 7, note = 0x49 }
+action = "deck.load_selected"
+deck = 4
+
+# VIEW: next window layout
+[[input]]
+midi = { channel = 7, note = 0x7A }
+action = "ui.layout"
+
+# ------------------------------------------------------------------------ LEDs
+#
+# The list gives MIDI-OUT for PLAY/PAUSE, CUE and CH CUE on the same note as the button
+# ("9n 0B hh", "9n 0C hh", "9n 54 hh"). Not yet seen lighting on the hardware: the
+# capture's LED check confirms them.
+
+[[output]]
+state = "deck.play_led"
+deck = 1
+midi = { channel = 1, note = 0x0B }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.cue_led"
+deck = 1
+midi = { channel = 1, note = 0x0C }
+on = 127
+off = 0
+
+[[output]]
+state = "channel.pfl"
+deck = 1
+midi = { channel = 1, note = 0x54 }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.play_led"
+deck = 2
+midi = { channel = 2, note = 0x0B }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.cue_led"
+deck = 2
+midi = { channel = 2, note = 0x0C }
+on = 127
+off = 0
+
+[[output]]
+state = "channel.pfl"
+deck = 2
+midi = { channel = 2, note = 0x54 }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.play_led"
+deck = 3
+midi = { channel = 3, note = 0x0B }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.cue_led"
+deck = 3
+midi = { channel = 3, note = 0x0C }
+on = 127
+off = 0
+
+[[output]]
+state = "channel.pfl"
+deck = 3
+midi = { channel = 3, note = 0x54 }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.play_led"
+deck = 4
+midi = { channel = 4, note = 0x0B }
+on = 127
+off = 0
+
+[[output]]
+state = "deck.cue_led"
+deck = 4
+midi = { channel = 4, note = 0x0C }
+on = 127
+off = 0
+
+[[output]]
+state = "channel.pfl"
+deck = 4
+midi = { channel = 4, note = 0x54 }
+on = 127
+off = 0
+
+# ----------------------------------------------------------------------------------
+# Not mapped: controls in Pioneer's list without a binding, with their messages. Deck
+# controls shown for deck 1 (channel 1); decks 2-4 send the same on channels 2-4.
+#
+#   DECK 1-4 buttons     notes 0x72 / 0x3C, SHIFT 0x73 (the controller switches decks itself)
+#   SHIFT + PLAY 0x47, SHIFT + BEAT SYNC 0x5C (as on the SB3)
+#   QUANTIZE 0x35, SHIFT 0x68         (Open Jockey has no quantize)
+#   KEY SYNC 0x65, SHIFT 0x64         (no key sync)
+#   MEMORY 0x3D, SHIFT 0x3E           (no memory cues)
+#   SHIFT + IN 0x4C, SHIFT + OUT 0x77, SHIFT + RELOOP/EXIT 0x50,
+#   SHIFT + CUE/LOOP CALL 0x61 / 0x62 (no matching actions)
+#   SHIFT + CH CUE 0x39; fader start notes 0x66 / 0x5D / 0x52 (no fader start)
+#   Pad mode SHIFT buttons 0x69 / 0x6B / 0x6D / 0x6F, SAMPLER long press 0x79
+#   Pads: Stems pads 5-8 (0x14-0x17) and SHIFT Stems, Keyboard (0x40-0x47), Pad FX
+#     (0x50-0x57), Key Shift (0x70-0x77) banks (no keyboard, pad FX or key shift)
+#   GROOVE CIRCUIT: GAIN cc14 0x12/0x32, DRUM SWAP 1-4 0x00-0x03 (SHIFT 0x2C-0x2F), CAPTURE
+#     0x08 (SHIFT 0x2B), DRUM ROLL 1-4 0x04-0x07 (SHIFT 0x30-0x33), DRUM RELEASE tilt
+#     0x24 / 0x26 / 0x27 (no groove circuit in Open Jockey)
+#
+#   Effects (no beat FX unit or channel assignment in Open Jockey):
+#     SOUND COLOR FX ON/OFF ch7 note 0x00 (SHIFT 0x08)
+#     channel 5: BEAT left/right 0x4A / 0x4B (SHIFT 0x66 / 0x6B), BEAT FX SELECT
+#     0x20-0x2D, BEAT FX CH SELECT 1-4 / SP / MST 0x10-0x13 / 0x16 / 0x14 (SHIFT +8),
+#     LEVEL/DEPTH cc14 0x02/0x22, BEAT FX ON/OFF 0x47 (SHIFT 0x43)
+#
+#   Global, channel 7:
+#     MASTER LEVEL cc14 0x08/0x28, HEADPHONES LEVEL cc14 0x0D/0x2D (see [[init]])
+#     BOOTH LEVEL cc14 0x09/0x29, MIC LEVEL cc14 0x05/0x25, MONO/STEREO note 0x6D
+#     MASTER CUE SHIFT 0x62
+#     SMART ROTARY SELECTOR: SHIFT + rotate cc 0x64; tilt forward 0x38 (SHIFT 0x39),
+#       backward 0x3A (0x3B), left 0x3C (0x3D), right 0x2E (0x3F)
+#     DISCOVER 0x35 (SHIFT 0x68), BACK 0x65 (0x66), SHIFT + VIEW 0x67,
+#     PREVIEW 0x36 (0x37), SHIFT + LOAD 1-4 0x58 / 0x59 / 0x60 / 0x61
+#   LED outputs not driven: LOAD illumination (ch16 notes 0x00-0x03), JOG indicator
+#     (ch16 cc 0x00-0x03), level meters (cc 0x02), BEAT FX beat indicator (ch5 cc 0x64)

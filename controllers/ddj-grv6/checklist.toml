@@ -1,0 +1,1025 @@
+# Capture checklist for the Pioneer DDJ-GRV6, used by `open-jockey midi capture`.
+#
+# The control list follows Pioneer's "DDJ-GRV6 MIDI Message List" E1 (its figure labels
+# B1-B6, D1-D20, G1-G11, M1-M15, F1-F9, P1-P12 are in the step comments). Only the list of
+# controls is taken from there; the capture confirms or corrects the draft mapping in
+# controllers/ddj-grv6/mapping.toml, whose values come from the same list.
+#
+# Each section may repeat once per deck (`decks`), with {deck} substituted in its name,
+# setup, ids and prompts. A step with `shift = true` is also captured with SHIFT held, as
+# a separate step whose id ends in ".shift"; `held_shift` marks a step that is itself done
+# with SHIFT held. `prepare` is done before listening starts, so that action is not
+# recorded. A section's `shift_control` names the earlier SHIFT button steps whose notes
+# are ignored in its SHIFT steps.
+#
+# The GRV6 is hardware layered (each deck sends on its own channel), so every deck is
+# captured: the left side for decks 1 and 3, the right side for decks 2 and 4. Each deck
+# section starts by selecting its deck with the DECK buttons.
+
+controller = "Pioneer DDJ-GRV6"
+
+# Nothing is ignored yet. If the capture shows messages nobody caused (a periodic message,
+# knob positions sent with buttons), mark them as noise with `x` during the capture.
+[ignore]
+sources = []
+
+[[section]]
+name = "Left deck {deck}"
+decks = [1, 3]
+setup = "Use the LEFT side. Press DECK {deck} so the LEFT side controls deck {deck}. For SHIFT steps, hold the LEFT SHIFT."
+shift_control = "deck{deck}.shift"
+
+# D3
+[[section.step]]
+id = "deck{deck}.shift"
+prompt = "Press and release LEFT SHIFT."
+kind = "button"
+
+# D1
+[[section.step]]
+id = "deck{deck}.play"
+prompt = "Press and release LEFT PLAY/PAUSE."
+kind = "button"
+shift = true
+
+# D2
+[[section.step]]
+id = "deck{deck}.cue"
+prompt = "Press and release LEFT CUE."
+kind = "button"
+shift = true
+
+# D19
+[[section.step]]
+id = "deck{deck}.beat_sync"
+prompt = "Press and release LEFT BEAT SYNC."
+kind = "button"
+shift = true
+
+# D20
+[[section.step]]
+id = "deck{deck}.key_sync"
+prompt = "Press and release LEFT KEY SYNC."
+kind = "button"
+shift = true
+
+# D17
+[[section.step]]
+id = "deck{deck}.master_tempo"
+prompt = "Press and release LEFT MASTER TEMPO."
+kind = "button"
+shift = true
+
+# D5
+[[section.step]]
+id = "deck{deck}.slip"
+prompt = "Press and release LEFT SLIP."
+kind = "button"
+shift = true
+
+# D6
+[[section.step]]
+id = "deck{deck}.quantize"
+prompt = "Press and release LEFT QUANTIZE."
+kind = "button"
+shift = true
+
+# D7
+[[section.step]]
+id = "deck{deck}.loop_in"
+prompt = "Press and release LEFT IN / 4 BEAT quickly."
+kind = "button"
+shift = true
+
+# D7 long press
+[[section.step]]
+id = "deck{deck}.loop_in_long"
+prompt = "Press LEFT IN / 4 BEAT and hold it for about two seconds, then release."
+kind = "button"
+
+# D8
+[[section.step]]
+id = "deck{deck}.loop_out"
+prompt = "Press and release LEFT OUT."
+kind = "button"
+shift = true
+
+# D9
+[[section.step]]
+id = "deck{deck}.reloop"
+prompt = "Press and release LEFT RELOOP / EXIT."
+kind = "button"
+shift = true
+
+# D10
+[[section.step]]
+id = "deck{deck}.call_left"
+prompt = "Press and release LEFT CUE/LOOP CALL left arrow."
+kind = "button"
+shift = true
+
+# D11
+[[section.step]]
+id = "deck{deck}.call_right"
+prompt = "Press and release LEFT CUE/LOOP CALL right arrow."
+kind = "button"
+shift = true
+
+# D12
+[[section.step]]
+id = "deck{deck}.memory"
+prompt = "Press and release LEFT MEMORY."
+kind = "button"
+shift = true
+
+# D4 touch
+[[section.step]]
+id = "deck{deck}.jog_touch"
+prompt = "Touch the top plate of the LEFT jog wheel without turning it, then let go."
+kind = "button"
+shift = true
+
+# D4 platter (also gives jog_steps_per_turn)
+[[section.step]]
+id = "deck{deck}.jog_top"
+prompt = "Keep a hand on the top plate of the LEFT jog wheel: turn it exactly one turn clockwise, then one turn counter-clockwise."
+kind = "jog"
+shift = true
+
+# D4 wheel side
+[[section.step]]
+id = "deck{deck}.jog_outer"
+prompt = "Turn the LEFT jog wheel by its side (do not touch the top plate) about one turn clockwise, then one turn counter-clockwise."
+kind = "jog"
+shift = true
+
+# D18
+[[section.step]]
+id = "deck{deck}.tempo"
+prepare = "Move the LEFT TEMPO slider fully AWAY from you."
+prompt = "Now pull the LEFT TEMPO slider fully toward you, then push it back to the middle."
+kind = "continuous"
+shift = true
+
+# B6
+[[section.step]]
+id = "deck{deck}.load"
+prompt = "Press and release the LEFT LOAD button (deck {deck} selected)."
+kind = "button"
+shift = true
+
+# M3
+[[section.step]]
+id = "deck{deck}.trim"
+prompt = "Turn the TRIM knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# M4
+[[section.step]]
+id = "deck{deck}.eq_high"
+prompt = "Turn the EQ HI knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# M5
+[[section.step]]
+id = "deck{deck}.eq_mid"
+prompt = "Turn the EQ MID knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# M6
+[[section.step]]
+id = "deck{deck}.eq_low"
+prompt = "Turn the EQ LOW knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# F1
+[[section.step]]
+id = "deck{deck}.color_fx"
+prompt = "Turn the SOUND COLOR FX knob of mixer channel {deck} fully left, then fully right, then back to the middle."
+kind = "continuous"
+
+# M2
+[[section.step]]
+id = "deck{deck}.fader"
+prompt = "Move the channel fader of mixer channel {deck} from the bottom to the top, then back to the bottom."
+kind = "continuous"
+shift = true
+
+# M7
+[[section.step]]
+id = "deck{deck}.ch_cue"
+prompt = "Press and release the CUE (headphones) button of mixer channel {deck}."
+kind = "button"
+shift = true
+
+# G1
+[[section.step]]
+id = "deck{deck}.groove_gain"
+prompt = "Turn the LEFT GROOVE CIRCUIT GAIN knob fully left, then fully right."
+kind = "continuous"
+
+# G2
+[[section.step]]
+id = "deck{deck}.drum_swap_1"
+prompt = "Press and release LEFT DRUM SWAP 1."
+kind = "button"
+shift = true
+
+# G3
+[[section.step]]
+id = "deck{deck}.drum_swap_2"
+prompt = "Press and release LEFT DRUM SWAP 2."
+kind = "button"
+shift = true
+
+# G4
+[[section.step]]
+id = "deck{deck}.drum_swap_3"
+prompt = "Press and release LEFT DRUM SWAP 3."
+kind = "button"
+shift = true
+
+# G5
+[[section.step]]
+id = "deck{deck}.drum_swap_4"
+prompt = "Press and release LEFT DRUM SWAP 4."
+kind = "button"
+shift = true
+
+# G6
+[[section.step]]
+id = "deck{deck}.capture"
+prompt = "Press and release LEFT CAPTURE."
+kind = "button"
+shift = true
+
+# G7
+[[section.step]]
+id = "deck{deck}.drum_roll_1"
+prompt = "Press and release LEFT DRUM ROLL 1."
+kind = "button"
+shift = true
+
+# G8
+[[section.step]]
+id = "deck{deck}.drum_roll_2"
+prompt = "Press and release LEFT DRUM ROLL 2."
+kind = "button"
+shift = true
+
+# G9
+[[section.step]]
+id = "deck{deck}.drum_roll_3"
+prompt = "Press and release LEFT DRUM ROLL 3."
+kind = "button"
+shift = true
+
+# G10
+[[section.step]]
+id = "deck{deck}.drum_roll_4"
+prompt = "Press and release LEFT DRUM ROLL 4."
+kind = "button"
+shift = true
+
+# G11
+[[section.step]]
+id = "deck{deck}.drum_release_forward"
+prompt = "Tilt the LEFT DRUM RELEASE lever forward, then let it go."
+kind = "button"
+shift = true
+
+# G11
+[[section.step]]
+id = "deck{deck}.drum_release_backward"
+prompt = "Tilt the LEFT DRUM RELEASE lever backward, then let it go."
+kind = "button"
+shift = true
+
+# P9
+[[section.step]]
+id = "deck{deck}.mode_hot_cue"
+prompt = "Press and release LEFT HOT CUE (pad mode button)."
+kind = "button"
+shift = true
+
+# P10
+[[section.step]]
+id = "deck{deck}.mode_stems"
+prompt = "Press and release LEFT STEMS (pad mode button)."
+kind = "button"
+shift = true
+
+# P11
+[[section.step]]
+id = "deck{deck}.mode_beat_jump"
+prompt = "Press and release LEFT BEAT JUMP (pad mode button)."
+kind = "button"
+shift = true
+
+# P12
+[[section.step]]
+id = "deck{deck}.mode_sampler"
+prompt = "Press and release LEFT SAMPLER (pad mode button)."
+kind = "button"
+shift = true
+
+# P12 long press
+[[section.step]]
+id = "deck{deck}.mode_sampler_long"
+prompt = "Press LEFT SAMPLER (pad mode button) and hold it for about two seconds, then release."
+kind = "button"
+
+# P1-P8, HOT CUE mode
+[[section.step]]
+id = "deck{deck}.pads_hot_cue"
+prepare = "Press LEFT HOT CUE (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_hot_cue.shift"
+prompt = "Still in HOT CUE mode: hold LEFT SHIFT and keep holding it, then tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + HOT CUE selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_hot_cue"
+prepare = "Hold LEFT SHIFT, press LEFT HOT CUE, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+# P1-P8, STEMS mode
+[[section.step]]
+id = "deck{deck}.pads_stems"
+prepare = "Press LEFT STEMS (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_stems.shift"
+prompt = "Still in STEMS mode: hold LEFT SHIFT and keep holding it, then tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + STEMS selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_stems"
+prepare = "Hold LEFT SHIFT, press LEFT STEMS, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+# P1-P8, BEAT JUMP mode
+[[section.step]]
+id = "deck{deck}.pads_beat_jump"
+prepare = "Press LEFT BEAT JUMP (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_beat_jump.shift"
+prompt = "Still in BEAT JUMP mode: hold LEFT SHIFT and keep holding it, then tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + BEAT JUMP selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_beat_jump"
+prepare = "Hold LEFT SHIFT, press LEFT BEAT JUMP, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+# P1-P8, SAMPLER mode
+[[section.step]]
+id = "deck{deck}.pads_sampler"
+prepare = "Press LEFT SAMPLER (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_sampler.shift"
+prompt = "Still in SAMPLER mode: hold LEFT SHIFT and keep holding it, then tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + SAMPLER selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_sampler"
+prepare = "Hold LEFT SHIFT, press LEFT SAMPLER, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 LEFT pads one by one, 1 to 8."
+kind = "pads"
+
+# D13-D16
+[[section.step]]
+id = "deck{deck}.deck_select"
+prompt = "Last step for deck {deck}: press LEFT DECK {deck} once, then hold LEFT SHIFT and press it again."
+kind = "button"
+
+[[section]]
+name = "Right deck {deck}"
+decks = [2, 4]
+setup = "Use the RIGHT side. Press DECK {deck} so the RIGHT side controls deck {deck}. For SHIFT steps, hold the RIGHT SHIFT."
+shift_control = "deck{deck}.shift"
+
+# D3
+[[section.step]]
+id = "deck{deck}.shift"
+prompt = "Press and release RIGHT SHIFT."
+kind = "button"
+
+# D1
+[[section.step]]
+id = "deck{deck}.play"
+prompt = "Press and release RIGHT PLAY/PAUSE."
+kind = "button"
+shift = true
+
+# D2
+[[section.step]]
+id = "deck{deck}.cue"
+prompt = "Press and release RIGHT CUE."
+kind = "button"
+shift = true
+
+# D19
+[[section.step]]
+id = "deck{deck}.beat_sync"
+prompt = "Press and release RIGHT BEAT SYNC."
+kind = "button"
+shift = true
+
+# D20
+[[section.step]]
+id = "deck{deck}.key_sync"
+prompt = "Press and release RIGHT KEY SYNC."
+kind = "button"
+shift = true
+
+# D17
+[[section.step]]
+id = "deck{deck}.master_tempo"
+prompt = "Press and release RIGHT MASTER TEMPO."
+kind = "button"
+shift = true
+
+# D5
+[[section.step]]
+id = "deck{deck}.slip"
+prompt = "Press and release RIGHT SLIP."
+kind = "button"
+shift = true
+
+# D6
+[[section.step]]
+id = "deck{deck}.quantize"
+prompt = "Press and release RIGHT QUANTIZE."
+kind = "button"
+shift = true
+
+# D7
+[[section.step]]
+id = "deck{deck}.loop_in"
+prompt = "Press and release RIGHT IN / 4 BEAT quickly."
+kind = "button"
+shift = true
+
+# D7 long press
+[[section.step]]
+id = "deck{deck}.loop_in_long"
+prompt = "Press RIGHT IN / 4 BEAT and hold it for about two seconds, then release."
+kind = "button"
+
+# D8
+[[section.step]]
+id = "deck{deck}.loop_out"
+prompt = "Press and release RIGHT OUT."
+kind = "button"
+shift = true
+
+# D9
+[[section.step]]
+id = "deck{deck}.reloop"
+prompt = "Press and release RIGHT RELOOP / EXIT."
+kind = "button"
+shift = true
+
+# D10
+[[section.step]]
+id = "deck{deck}.call_left"
+prompt = "Press and release RIGHT CUE/LOOP CALL left arrow."
+kind = "button"
+shift = true
+
+# D11
+[[section.step]]
+id = "deck{deck}.call_right"
+prompt = "Press and release RIGHT CUE/LOOP CALL right arrow."
+kind = "button"
+shift = true
+
+# D12
+[[section.step]]
+id = "deck{deck}.memory"
+prompt = "Press and release RIGHT MEMORY."
+kind = "button"
+shift = true
+
+# D4 touch
+[[section.step]]
+id = "deck{deck}.jog_touch"
+prompt = "Touch the top plate of the RIGHT jog wheel without turning it, then let go."
+kind = "button"
+shift = true
+
+# D4 platter (also gives jog_steps_per_turn)
+[[section.step]]
+id = "deck{deck}.jog_top"
+prompt = "Keep a hand on the top plate of the RIGHT jog wheel: turn it exactly one turn clockwise, then one turn counter-clockwise."
+kind = "jog"
+shift = true
+
+# D4 wheel side
+[[section.step]]
+id = "deck{deck}.jog_outer"
+prompt = "Turn the RIGHT jog wheel by its side (do not touch the top plate) about one turn clockwise, then one turn counter-clockwise."
+kind = "jog"
+shift = true
+
+# D18
+[[section.step]]
+id = "deck{deck}.tempo"
+prepare = "Move the RIGHT TEMPO slider fully AWAY from you."
+prompt = "Now pull the RIGHT TEMPO slider fully toward you, then push it back to the middle."
+kind = "continuous"
+shift = true
+
+# B6
+[[section.step]]
+id = "deck{deck}.load"
+prompt = "Press and release the RIGHT LOAD button (deck {deck} selected)."
+kind = "button"
+shift = true
+
+# M3
+[[section.step]]
+id = "deck{deck}.trim"
+prompt = "Turn the TRIM knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# M4
+[[section.step]]
+id = "deck{deck}.eq_high"
+prompt = "Turn the EQ HI knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# M5
+[[section.step]]
+id = "deck{deck}.eq_mid"
+prompt = "Turn the EQ MID knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# M6
+[[section.step]]
+id = "deck{deck}.eq_low"
+prompt = "Turn the EQ LOW knob of mixer channel {deck} fully left, then fully right."
+kind = "continuous"
+
+# F1
+[[section.step]]
+id = "deck{deck}.color_fx"
+prompt = "Turn the SOUND COLOR FX knob of mixer channel {deck} fully left, then fully right, then back to the middle."
+kind = "continuous"
+
+# M2
+[[section.step]]
+id = "deck{deck}.fader"
+prompt = "Move the channel fader of mixer channel {deck} from the bottom to the top, then back to the bottom."
+kind = "continuous"
+shift = true
+
+# M7
+[[section.step]]
+id = "deck{deck}.ch_cue"
+prompt = "Press and release the CUE (headphones) button of mixer channel {deck}."
+kind = "button"
+shift = true
+
+# G1
+[[section.step]]
+id = "deck{deck}.groove_gain"
+prompt = "Turn the RIGHT GROOVE CIRCUIT GAIN knob fully left, then fully right."
+kind = "continuous"
+
+# G2
+[[section.step]]
+id = "deck{deck}.drum_swap_1"
+prompt = "Press and release RIGHT DRUM SWAP 1."
+kind = "button"
+shift = true
+
+# G3
+[[section.step]]
+id = "deck{deck}.drum_swap_2"
+prompt = "Press and release RIGHT DRUM SWAP 2."
+kind = "button"
+shift = true
+
+# G4
+[[section.step]]
+id = "deck{deck}.drum_swap_3"
+prompt = "Press and release RIGHT DRUM SWAP 3."
+kind = "button"
+shift = true
+
+# G5
+[[section.step]]
+id = "deck{deck}.drum_swap_4"
+prompt = "Press and release RIGHT DRUM SWAP 4."
+kind = "button"
+shift = true
+
+# G6
+[[section.step]]
+id = "deck{deck}.capture"
+prompt = "Press and release RIGHT CAPTURE."
+kind = "button"
+shift = true
+
+# G7
+[[section.step]]
+id = "deck{deck}.drum_roll_1"
+prompt = "Press and release RIGHT DRUM ROLL 1."
+kind = "button"
+shift = true
+
+# G8
+[[section.step]]
+id = "deck{deck}.drum_roll_2"
+prompt = "Press and release RIGHT DRUM ROLL 2."
+kind = "button"
+shift = true
+
+# G9
+[[section.step]]
+id = "deck{deck}.drum_roll_3"
+prompt = "Press and release RIGHT DRUM ROLL 3."
+kind = "button"
+shift = true
+
+# G10
+[[section.step]]
+id = "deck{deck}.drum_roll_4"
+prompt = "Press and release RIGHT DRUM ROLL 4."
+kind = "button"
+shift = true
+
+# G11
+[[section.step]]
+id = "deck{deck}.drum_release_forward"
+prompt = "Tilt the RIGHT DRUM RELEASE lever forward, then let it go."
+kind = "button"
+shift = true
+
+# G11
+[[section.step]]
+id = "deck{deck}.drum_release_backward"
+prompt = "Tilt the RIGHT DRUM RELEASE lever backward, then let it go."
+kind = "button"
+shift = true
+
+# P9
+[[section.step]]
+id = "deck{deck}.mode_hot_cue"
+prompt = "Press and release RIGHT HOT CUE (pad mode button)."
+kind = "button"
+shift = true
+
+# P10
+[[section.step]]
+id = "deck{deck}.mode_stems"
+prompt = "Press and release RIGHT STEMS (pad mode button)."
+kind = "button"
+shift = true
+
+# P11
+[[section.step]]
+id = "deck{deck}.mode_beat_jump"
+prompt = "Press and release RIGHT BEAT JUMP (pad mode button)."
+kind = "button"
+shift = true
+
+# P12
+[[section.step]]
+id = "deck{deck}.mode_sampler"
+prompt = "Press and release RIGHT SAMPLER (pad mode button)."
+kind = "button"
+shift = true
+
+# P12 long press
+[[section.step]]
+id = "deck{deck}.mode_sampler_long"
+prompt = "Press RIGHT SAMPLER (pad mode button) and hold it for about two seconds, then release."
+kind = "button"
+
+# P1-P8, HOT CUE mode
+[[section.step]]
+id = "deck{deck}.pads_hot_cue"
+prepare = "Press RIGHT HOT CUE (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_hot_cue.shift"
+prompt = "Still in HOT CUE mode: hold RIGHT SHIFT and keep holding it, then tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + HOT CUE selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_hot_cue"
+prepare = "Hold RIGHT SHIFT, press RIGHT HOT CUE, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+# P1-P8, STEMS mode
+[[section.step]]
+id = "deck{deck}.pads_stems"
+prepare = "Press RIGHT STEMS (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_stems.shift"
+prompt = "Still in STEMS mode: hold RIGHT SHIFT and keep holding it, then tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + STEMS selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_stems"
+prepare = "Hold RIGHT SHIFT, press RIGHT STEMS, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+# P1-P8, BEAT JUMP mode
+[[section.step]]
+id = "deck{deck}.pads_beat_jump"
+prepare = "Press RIGHT BEAT JUMP (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_beat_jump.shift"
+prompt = "Still in BEAT JUMP mode: hold RIGHT SHIFT and keep holding it, then tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + BEAT JUMP selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_beat_jump"
+prepare = "Hold RIGHT SHIFT, press RIGHT BEAT JUMP, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+# P1-P8, SAMPLER mode
+[[section.step]]
+id = "deck{deck}.pads_sampler"
+prepare = "Press RIGHT SAMPLER (without SHIFT) to select its pad mode."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+[[section.step]]
+id = "deck{deck}.pads_sampler.shift"
+prompt = "Still in SAMPLER mode: hold RIGHT SHIFT and keep holding it, then tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+held_shift = true
+
+# P1-P8, the mode SHIFT + SAMPLER selects (Keyboard, Pad FX, Beat Loop or Key Shift)
+[[section.step]]
+id = "deck{deck}.pads_shift_sampler"
+prepare = "Hold RIGHT SHIFT, press RIGHT SAMPLER, then release both (the second pad mode of that button)."
+prompt = "Tap the 8 RIGHT pads one by one, 1 to 8."
+kind = "pads"
+
+# D13-D16
+[[section.step]]
+id = "deck{deck}.deck_select"
+prompt = "Last step for deck {deck}: press RIGHT DECK {deck} once, then hold RIGHT SHIFT and press it again."
+kind = "button"
+
+[[section]]
+name = "Mixer"
+setup = "The global mixer controls. For SHIFT steps, hold the LEFT SHIFT."
+shift_control = ["deck1.shift", "deck3.shift"]
+
+# M1
+[[section.step]]
+id = "mixer.crossfader"
+prompt = "Move the CROSSFADER fully left, then fully right, then back to the middle."
+kind = "continuous"
+shift = true
+
+# M8
+[[section.step]]
+id = "mixer.master_level"
+prompt = "Turn the MASTER LEVEL knob fully left, then fully right."
+kind = "continuous"
+
+# M10
+[[section.step]]
+id = "mixer.booth_level"
+prompt = "Turn the BOOTH LEVEL knob fully left, then fully right."
+kind = "continuous"
+
+# M12
+[[section.step]]
+id = "mixer.headphones_level"
+prompt = "Turn the HEADPHONES LEVEL knob fully left, then fully right."
+kind = "continuous"
+
+# M13
+[[section.step]]
+id = "mixer.headphones_mix"
+prompt = "Turn the HEADPHONES MIX knob fully left (CUE), then fully right (MASTER)."
+kind = "continuous"
+
+# M14
+[[section.step]]
+id = "mixer.mic_level"
+prompt = "Turn the MIC LEVEL knob fully left, then fully right."
+kind = "continuous"
+
+# M9
+[[section.step]]
+id = "mixer.master_cue"
+prompt = "Press and release MASTER CUE."
+kind = "button"
+shift = true
+
+# F2
+[[section.step]]
+id = "mixer.color_fx_on"
+prompt = "Press and release the SOUND COLOR FX ON/OFF button."
+kind = "button"
+shift = true
+
+# M11
+[[section.step]]
+id = "mixer.mono_stereo"
+prompt = "Move the MONO/STEREO switch to the other position, then back. Skip (s) if you cannot reach it."
+kind = "button"
+
+[[section]]
+name = "Beat FX"
+setup = "The BEAT FX section. For SHIFT steps, hold the LEFT SHIFT."
+shift_control = ["deck1.shift", "deck3.shift"]
+
+# F3
+[[section.step]]
+id = "fx.beat_left"
+prompt = "Press and release BEAT left arrow."
+kind = "button"
+shift = true
+
+# F4
+[[section.step]]
+id = "fx.beat_right"
+prompt = "Press and release BEAT right arrow."
+kind = "button"
+shift = true
+
+# F5
+[[section.step]]
+id = "fx.select"
+prompt = "Turn the BEAT FX SELECT knob slowly one click at a time through every effect, then back."
+kind = "jog"
+
+# F6
+[[section.step]]
+id = "fx.ch_select_ch1"
+prompt = "Press and release BEAT FX CH SELECT 1."
+kind = "button"
+shift = true
+
+# F6
+[[section.step]]
+id = "fx.ch_select_ch2"
+prompt = "Press and release BEAT FX CH SELECT 2."
+kind = "button"
+shift = true
+
+# F6
+[[section.step]]
+id = "fx.ch_select_ch3"
+prompt = "Press and release BEAT FX CH SELECT 3."
+kind = "button"
+shift = true
+
+# F6
+[[section.step]]
+id = "fx.ch_select_ch4"
+prompt = "Press and release BEAT FX CH SELECT 4."
+kind = "button"
+shift = true
+
+# F6
+[[section.step]]
+id = "fx.ch_select_sampler"
+prompt = "Press and release BEAT FX CH SELECT SP (sampler)."
+kind = "button"
+shift = true
+
+# F6
+[[section.step]]
+id = "fx.ch_select_master"
+prompt = "Press and release BEAT FX CH SELECT MST (master)."
+kind = "button"
+shift = true
+
+# F7
+[[section.step]]
+id = "fx.level"
+prompt = "Turn the BEAT FX LEVEL/DEPTH knob fully left, then fully right."
+kind = "continuous"
+
+# F8
+[[section.step]]
+id = "fx.on"
+prompt = "Press and release BEAT FX ON/OFF."
+kind = "button"
+shift = true
+
+[[section]]
+name = "Browser"
+setup = "The SMART ROTARY SELECTOR and browser buttons. For SHIFT steps, hold the LEFT SHIFT."
+shift_control = ["deck1.shift", "deck3.shift"]
+
+# B1
+[[section.step]]
+id = "browse.rotate"
+prompt = "Turn the SMART ROTARY SELECTOR a few clicks clockwise, then a few clicks counter-clockwise."
+kind = "jog"
+shift = true
+
+# B1
+[[section.step]]
+id = "browse.press"
+prompt = "Press and release the SMART ROTARY SELECTOR."
+kind = "button"
+shift = true
+
+# B1 tilt
+[[section.step]]
+id = "browse.tilt_forward"
+prompt = "Tilt the SMART ROTARY SELECTOR forward, then let it go."
+kind = "button"
+shift = true
+
+# B1 tilt
+[[section.step]]
+id = "browse.tilt_backward"
+prompt = "Tilt the SMART ROTARY SELECTOR backward, then let it go."
+kind = "button"
+shift = true
+
+# B1 tilt
+[[section.step]]
+id = "browse.tilt_left"
+prompt = "Tilt the SMART ROTARY SELECTOR left, then let it go."
+kind = "button"
+shift = true
+
+# B1 tilt
+[[section.step]]
+id = "browse.tilt_right"
+prompt = "Tilt the SMART ROTARY SELECTOR right, then let it go."
+kind = "button"
+shift = true
+
+# B2
+[[section.step]]
+id = "browse.discover"
+prompt = "Press and release DISCOVER."
+kind = "button"
+shift = true
+
+# B3
+[[section.step]]
+id = "browse.back"
+prompt = "Press and release BACK."
+kind = "button"
+shift = true
+
+# B4
+[[section.step]]
+id = "browse.view"
+prompt = "Press and release VIEW."
+kind = "button"
+shift = true
+
+# B5
+[[section.step]]
+id = "browse.preview"
+prompt = "Press and release PREVIEW."
+kind = "button"
+shift = true
