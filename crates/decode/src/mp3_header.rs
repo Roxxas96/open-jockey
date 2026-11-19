@@ -222,11 +222,13 @@ mod tests {
         assert!(l.info_frame);
         assert_eq!(l.info_encoder, Some(InfoEncoder::Lame));
         assert_eq!(l.frame_samples, 1152);
+        assert_eq!(l.delay_frames, 1105);
 
         let l = read("OJ Cal 07 lame 22k CBR.mp3");
         assert!(l.info_frame);
         assert_eq!(l.info_encoder, Some(InfoEncoder::Lame));
         assert_eq!(l.frame_samples, 576);
+        assert_eq!(l.delay_frames, 1105);
 
         for name in [
             "OJ Cal 02 ffmpeg 44k no-Info.mp3",
@@ -236,6 +238,8 @@ mod tests {
             assert!(!l.info_frame, "{name}");
             assert_eq!(l.info_encoder, None, "{name}");
             assert_eq!(l.frame_samples, 1152, "{name}");
+            assert_eq!(l.delay_frames, 0, "{name}");
+            assert!(!l.gapless_header, "{name}");
         }
 
         assert_eq!(read("OJ Cal 00 reference 44k.wav").frame_samples, 0);
@@ -413,6 +417,18 @@ mod tests {
         assert!(got.info_frame);
         assert_eq!(got.info_encoder, Some(InfoEncoder::Other));
         assert_eq!(got.frame_samples, 576);
+    }
+
+    #[test]
+    fn a_vbri_frame_is_not_an_info_frame() {
+        // Fraunhofer's VBRI header sits at byte 36 (4 + 32); symphonia reads only Xing and
+        // Info, so it is an ordinary audio frame to the decoder and here.
+        let mut bytes = info_frame(b"VBRI", b"LAME3.100");
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+        let f = first_frame(&mut Cursor::new(bytes)).unwrap();
+        assert!(!f.info_frame);
+        assert_eq!(f.info_encoder, None);
+        assert_eq!(f.frame_samples, 1152);
     }
 
     #[test]

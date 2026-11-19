@@ -136,7 +136,7 @@ mod tests {
             kind,
             lead_in: LeadIn {
                 gapless_header,
-                delay_frames: 0,
+                delay_frames: if gapless_header { 1105 } else { 0 },
                 // An MP3 with a gapless header has a LAME Info frame; other kinds have none.
                 info_frame: gapless_header,
                 info_encoder: gapless_header.then_some(decode::InfoEncoder::Lame),
@@ -225,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn rekordbox_mp3_with_lame_header_is_a_frame_later() {
+    fn rekordbox_mp3_with_lame_header_is_the_trimmed_delay_plus_a_frame_later() {
         let t = track(FileKind::Mp3, true);
-        let want = 1.0 + 1152.0 / 44_100.0;
+        let want = 1.0 + (1105.0 + 1152.0) / 44_100.0;
         assert!((app_seconds(App::Rekordbox, 44_100.0, &t) - want).abs() < 1e-9);
     }
 
