@@ -8,6 +8,11 @@ use crate::InfoEncoder;
 /// How far past the ID3v2 tag the first frame is looked for.
 const SEARCH_BYTES: u64 = 64 * 1024;
 
+/// The most consecutive ID3v2 tags skipped before the audio, and the most bytes they may span
+/// (symphonia's probe looks up to 1 MiB in).
+const MAX_ID3_TAGS: usize = 8;
+const MAX_ID3_BYTES: u64 = 16 * 1024 * 1024;
+
 /// The longest Layer III frame (MPEG-1, 320 kb/s, 32 kHz, padded: 1441 bytes) plus a
 /// header: read past the window so a candidate near its end still has its next frame checked.
 const MAX_FRAME_BYTES: u64 = 1441 + 4;
@@ -85,9 +90,15 @@ fn header(b: &[u8]) -> Option<Header> {
 
 /// Reads the first MP3 frame after `r`'s ID3v2 tag (if any). `None` when no frame is found.
 pub(crate) fn first_frame<R: Read + Seek>(r: &mut R) -> Option<FirstFrame> {
-    let mut id3 = [0u8; 10];
-    r.read_exact(&mut id3).ok()?;
-    let start = if &id3[..3] == b"ID3" {
+    // Skip every ID3v2 tag in a row (some taggers prepend a new one and leave the old), as
+    // symphonia's probe does, up to a cap on their count and total size.
+    let mut start = 0u64;
+    for _ in 0..MAX_ID3_TAGS {
+        r.seek(SeekFrom::Start(start)).ok()?;
+        let mut id3 = [0u8; 10];
+        if r.read_exact(&mut id3).is_err() || &id3[..3] != b"ID3" {
+            break;
+        }
         let size = id3[6..10]
             .iter()
             .fold(0u64, |acc, &b| (acc << 7) | u64::from(b & 0x7F));
@@ -97,10 +108,11 @@ pub(crate) fn first_frame<R: Read + Seek>(r: &mut R) -> Option<FirstFrame> {
         } else {
             0
         };
-        10 + size + footer
-    } else {
-        0
-    };
+        start = start.saturating_add(10 + size + footer);
+        if start > MAX_ID3_BYTES {
+            return None;
+        }
+    }
     r.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
     let wanted = SEARCH_BYTES + MAX_FRAME_BYTES;
@@ -163,7 +175,9 @@ fn read_frame(frame: &[u8], head: Header) -> FirstFrame {
 fn encoder(name: &[u8]) -> Option<InfoEncoder> {
     if name.starts_with(b"LAME") {
         Some(InfoEncoder::Lame)
-    } else if name.starts_with(b"Lavc") {
+    } else if name.starts_with(b"Lavc") || name.starts_with(b"Lavf") {
+        // "Lavf" is FFmpeg's muxer string when the stream has no encoder tag (stream copies).
+        // Same writer as "Lavc", but unmeasured: it follows Lavc by reasoning, not calibration.
         Some(InfoEncoder::Lavc)
     } else if name.get(..4)?.iter().all(u8::is_ascii_graphic) {
         Some(InfoEncoder::Other)
@@ -399,6 +413,43 @@ mod tests {
         assert!(got.info_frame);
         assert_eq!(got.info_encoder, Some(InfoEncoder::Other));
         assert_eq!(got.frame_samples, 576);
+    }
+
+    #[test]
+    fn a_lavf_tag_is_classed_like_lavc() {
+        let mut bytes = info_frame(b"Info", b"Lavf58.76");
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+        let f = first_frame(&mut Cursor::new(bytes)).unwrap();
+        assert!(f.info_frame);
+        assert_eq!(f.info_encoder, Some(InfoEncoder::Lavc));
+    }
+
+    #[test]
+    fn stacked_id3_tags_are_all_skipped() {
+        // A second ID3v2 tag over 64 KiB, as a tagger that prepends a new tag leaves it.
+        let mut bytes = id3v24(b"", 20, false);
+        bytes.extend_from_slice(&id3v24(b"", 70 * 1024, true));
+        let real_at = bytes.len() as u64;
+        bytes.extend_from_slice(&info_frame(b"Info", b"LAME3.100"));
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+
+        let f = first_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(f.offset, real_at);
+        assert!(f.info_frame);
+        assert_eq!(f.info_encoder, Some(InfoEncoder::Lame));
+    }
+
+    #[test]
+    fn id3_tag_skipping_is_capped() {
+        // More than MAX_ID3_TAGS tags: the rest is not skipped, so the frame behind them is
+        // not found by skipping (it lies past the window only if the tags are large).
+        let mut bytes = Vec::new();
+        for _ in 0..=MAX_ID3_TAGS {
+            bytes.extend_from_slice(&id3v24(b"", 70 * 1024, false));
+        }
+        bytes.extend_from_slice(&info_frame(b"Info", b"LAME3.100"));
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+        assert_eq!(first_frame(&mut Cursor::new(bytes)), None);
     }
 
     #[test]

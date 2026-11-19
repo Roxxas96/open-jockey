@@ -28,8 +28,9 @@ pub enum App {
 /// - **rekordbox**: `delay_frames` plus one frame (`frame_samples`) for a LAME-style tag
 ///   (44.1k files 03/04: 51.2 ms, measured 51; 48k file 06: 47.0, measured 46; 22.05k file 07:
 ///   76.2, measured 76), or `delay_frames` alone for an FFmpeg (`Lavc`) tag (file 01: 25.1 ms,
-///   measured 24). A tag whose encoder is unreadable or another name (`None`, `Other`) is
-///   treated as LAME-style: a guess, as most encoders write LAME's tag.
+///   measured 24); a "Lavf" tag (same FFmpeg writer, unmeasured) is classed like it. A tag
+///   whose encoder is unreadable or another name (`None`, `Other`) is treated as LAME-style:
+///   a guess, as most encoders write LAME's tag.
 /// - **VirtualDJ**: 0 (the 11a import lined up with no offset).
 ///
 /// rekordbox's values are on the same timeline as `TEMPO Inizio` and the ANLZ beat grid.
