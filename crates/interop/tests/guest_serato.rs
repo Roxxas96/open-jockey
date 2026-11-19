@@ -336,12 +336,7 @@ fn serato_grid_from_the_tempo_map() {
     assert!((wav.bpm.unwrap() - 119.995_584).abs() < 1e-5);
     // 126.mp3: the map's seconds less the Info-frame shift, as for its cues.
     let mp3 = track_named(source, "OJ Click 126");
-    let rate = f64::from(
-        library::tags::read(&fixture().join("Serato").join("OJ Click 126.mp3"))
-            .sample_rate
-            .unwrap(),
-    );
-    let want = 0.531_400_496 - 1152.0 / rate;
+    let want = 0.531_400_496 - 0.050;
     assert!((mp3.first_beat.unwrap() - want).abs() < 1e-6);
     assert!((mp3.bpm.unwrap() - 126.000_728).abs() < 1e-5);
 }
@@ -352,11 +347,6 @@ fn serato_mp3_cues_match_what_serato_wrote() {
     // Info-frame shift. Pins the shift's direction against a file Serato wrote.
     let stick = read_stick(&fixture(), "OJGUEST");
     let source = serato(&stick);
-    let rate = f64::from(
-        library::tags::read(&fixture().join("Serato").join("OJ Click 126.mp3"))
-            .sample_rate
-            .unwrap(),
-    );
     let track = track_named(source, "OJ Click 126");
     for (slot, ms, color) in [
         (0, 7954.0, 0xCC0000),
@@ -364,7 +354,7 @@ fn serato_mp3_cues_match_what_serato_wrote() {
         (2, 44451.0, 0x0000CC),
     ] {
         let cue = track.hotcues.iter().find(|c| c.slot == slot).unwrap();
-        let want = ms / 1000.0 - 1152.0 / rate;
+        let want = ms / 1000.0 - 0.050;
         assert!(
             (cue.seconds - want).abs() < 1e-6,
             "slot {slot}: {}",

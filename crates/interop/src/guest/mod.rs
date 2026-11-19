@@ -5,7 +5,7 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-mod anlz;
+pub(crate) mod anlz;
 mod pdb;
 mod rekordbox_device;
 mod rekordbox_xml;

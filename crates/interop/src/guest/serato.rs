@@ -14,7 +14,7 @@ use crate::export::FileKind;
 use crate::export::serato::markers::{Marker, read_markers2};
 use crate::export::serato::tags::{read_id3, serato_frames};
 use crate::export::serato::tlv::{Body, Record, decode, utf16be};
-use crate::export::timing::SERATO_INFO_FRAME_FRAMES;
+use crate::export::timing::{App, app_offset_seconds};
 
 /// Slots of a guest hotcue.
 const SLOTS: u8 = 8;
@@ -287,13 +287,9 @@ fn tags_of(path: &Path) -> (Vec<GuestCue>, Option<(f64, f64)>) {
     if markers.is_none() && grid.is_none() {
         return (Vec::new(), None);
     }
-    let shift = if kind == FileKind::Mp3 && decode::lead_in(path).is_ok_and(|l| l.gapless_header) {
-        library::tags::read(path)
-            .sample_rate
-            .filter(|&r| r > 0)
-            .map_or(0.0, |r| SERATO_INFO_FRAME_FRAMES / f64::from(r))
-    } else {
-        0.0
+    let shift = match (decode::lead_in(path), library::tags::read(path).sample_rate) {
+        (Ok(lead_in), Some(rate)) => app_offset_seconds(App::Serato, kind, &lead_in, rate),
+        _ => 0.0,
     };
     let cues = markers.map_or_else(Vec::new, |data| {
         cues_from_markers(read_markers2(&data), shift)
