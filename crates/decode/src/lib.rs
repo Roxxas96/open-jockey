@@ -127,7 +127,7 @@ fn probe(path: &Path) -> Result<Box<dyn FormatReader>, DecodeError> {
 pub enum InfoEncoder {
     /// "LAME…": LAME's own tag.
     Lame,
-    /// "Lavc…": FFmpeg's libavcodec.
+    /// "Lavc…" (FFmpeg libavcodec) or "Lavf…" (its muxer, for stream copies; unmeasured, taken as Lavc).
     Lavc,
     /// Another printable name.
     Other,
