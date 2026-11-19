@@ -47,7 +47,7 @@ pub(crate) fn read_id3(copy: &Path, kind: &FileKind) -> Result<Option<Id3v2Tag>,
         path: copy.to_path_buf(),
         source,
     })?;
-    let opts = ParseOptions::new();
+    let opts = ParseOptions::new().read_properties(false);
     match kind {
         FileKind::Mp3 => MpegFile::read_from(&mut file, opts)
             .map(|f| f.id3v2().cloned())

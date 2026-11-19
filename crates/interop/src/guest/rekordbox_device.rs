@@ -10,7 +10,7 @@ use super::anlz::{AnlzData, read_anlz};
 use super::pdb::{NodeRow, PdbLibrary, read_pdb};
 use super::{
     GuestApp, GuestPlaylist, GuestSource, GuestTrack, MAX_DEPTH, MAX_NAME_BYTES, MAX_PLAYLISTS,
-    dir_on_stick, join_name, on_stick, read_capped, track_from_tags,
+    dir_on_stick, join_name, on_stick, read_capped, rekordbox_to_ours, track_from_tags,
 };
 
 /// The largest `export.pdb` read.
@@ -86,6 +86,7 @@ pub(super) fn read(root: &Path, markers: &library::GuestMarkers) -> Option<Guest
             Err(Refused::Missing) => counts.anlz_missing += 1,
             Err(Refused::Unreadable) => counts.anlz_unreadable += 1,
         }
+        rekordbox_to_ours(&mut track);
         ids.insert(row.id, source.tracks.len());
         source.tracks.push(track);
     }

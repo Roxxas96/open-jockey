@@ -5,6 +5,9 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use crate::export::FileKind;
+use crate::export::timing::{App, ours_seconds};
+
 pub(crate) mod anlz;
 mod pdb;
 mod rekordbox_device;
@@ -181,6 +184,31 @@ fn track_from_tags(path: PathBuf) -> GuestTrack {
         first_beat: None,
         main_cue: None,
         hotcues: Vec::new(),
+    }
+}
+
+/// Moves a rekordbox track's marks from rekordbox's timeline onto Open Jockey's: the first
+/// beat, the main cue and every hotcue start, less the app's offset for the file (an MP3's
+/// `lead_in` is read once). A mark that lands before our 0 is clamped to 0, not dropped; loop
+/// lengths are durations and stay as they are. A file whose `lead_in` or rate cannot be read
+/// gets no shift.
+fn rekordbox_to_ours(track: &mut GuestTrack) {
+    let kind = FileKind::of(&track.path);
+    if kind != FileKind::Mp3 {
+        return;
+    }
+    let (Ok(lead_in), Some(rate)) = (
+        decode::lead_in(&track.path),
+        library::tags::read(&track.path).sample_rate,
+    ) else {
+        return;
+    };
+    let ours =
+        |seconds: f64| ours_seconds(App::Rekordbox, seconds, kind.clone(), &lead_in, rate).max(0.0);
+    track.first_beat = track.first_beat.map(ours);
+    track.main_cue = track.main_cue.map(ours);
+    for cue in &mut track.hotcues {
+        cue.seconds = ours(cue.seconds);
     }
 }
 

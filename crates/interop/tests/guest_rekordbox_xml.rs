@@ -98,7 +98,8 @@ fn rekordbox_xml_uses_its_grid_even_when_wrong() {
     assert_eq!(t120.first_beat, Some(0.015));
     // Only the first TEMPO counts.
     let t126 = by_title(source, "OJ Click 126");
-    assert_eq!(t126.first_beat, Some(0.024));
+    // 0.024 s less the 1105-frame (25.06 ms) shift of a Lavc MP3 is before our 0: clamped.
+    assert_eq!(t126.first_beat, Some(0.0));
 }
 
 #[test]
@@ -234,7 +235,12 @@ fn fades_and_load_markers_never_become_the_main_cue() {
     let dir = stick_with(body);
     let read = read_stick(dir.path(), "T");
     let source = xml(&read);
-    assert_eq!(source.tracks[0].main_cue, Some(4.0));
+    // The 126 MP3 is a Lavc file with an Info frame: rekordbox's 4.0 s is 1105 frames later than ours.
+    let main_cue = source.tracks[0].main_cue.unwrap();
+    assert!(
+        (main_cue - (4.0 - 1105.0 / 44_100.0)).abs() < 1e-9,
+        "{main_cue}"
+    );
     assert!(source.tracks[0].hotcues.is_empty());
 }
 

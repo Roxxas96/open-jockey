@@ -10,7 +10,8 @@ use quick_xml::{Reader, XmlVersion};
 
 use super::{
     GuestApp, GuestCue, GuestPlaylist, GuestSource, GuestTrack, MAX_DEPTH, MAX_NAME_BYTES,
-    MAX_PATH_PARTS, MAX_PLAYLISTS, join_name, on_stick, read_capped, track_from_tags,
+    MAX_PATH_PARTS, MAX_PLAYLISTS, join_name, on_stick, read_capped, rekordbox_to_ours,
+    track_from_tags,
 };
 
 /// Slots of a guest hotcue; rekordbox's `Num` 0..=7.
@@ -340,6 +341,7 @@ fn finish(
     track.main_cue = t.main_cue;
     track.hotcues = t.hotcues;
     track.hotcues.sort_by_key(|c| c.slot);
+    rekordbox_to_ours(&mut track);
     ids.insert(t.id, source.tracks.len());
     source.tracks.push(track);
 }
