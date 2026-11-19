@@ -1,0 +1,6 @@
+# Open Jockey settings for the Pioneer DDJ-FLX4 (Windows test build).
+# The window's Settings change this file. See docs/config.md for every key.
+
+[controller]
+# A path relative to this folder: the .bat file starts Open Jockey from here.
+mapping = "controllers/ddj-flx4/mapping.toml"
