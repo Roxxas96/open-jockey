@@ -9,8 +9,8 @@ tags go into the copies on the stick only.
 VirtualDJ 2026 on macOS (2026-11-10 and 11):
 
 - The playlists show in order in all three, and hotcue positions are exact in all three. The
-  timing constants below are confirmed: a Serato MP3 with an Info frame is 1152 frames
-  later, the others are unshifted.
+  timing rules in [Timing](#timing) were first set from this check; the OJCAL calibration
+  stick later replaced the MP3 numbers with measured ones.
 - Exporting again copies nothing new and shows a hotcue that was moved; a playlist that is
   unticked disappears from all three.
 - Serato shows a track that is repeated in a playlist once: that is Serato's own limit (it
@@ -97,18 +97,37 @@ Open Jockey stores positions in frames, counted from the first sample after the 
 (an MP3's Info frame and encoder delay are skipped). Each app counts from its own start, so
 `export/timing.rs` in the interop crate converts a position for each app:
 
-| App | Shift | Constant |
-| --- | --- | --- |
-| VirtualDJ | none (the 11a import lined up with no offset) | none |
-| Rekordbox | none | none |
-| Serato, MP3 with an Info frame | one MP3 frame (1152 samples, about 26 ms) later | `SERATO_INFO_FRAME_FRAMES` |
-| Serato, WAV or MP3 without one | none | none |
+Only an MP3 whose header has a Xing or Info frame is shifted. Open Jockey trims the encoder
+delay plus the decoder's 529 frames (576 + 529 = 1105 for LAME and FFmpeg files) there, and
+Serato and rekordbox each count from somewhere else. Every other file (WAV, AIFF, FLAC, M4A,
+an MP3 without the frame or with a VBRI one) is unshifted in all three apps. In plain words,
+the app shows a position this much later than Open Jockey does:
 
-These values were confirmed in the hands-on with a click track: a 60 s file with a
-4 ms, 2 kHz click every half second (120 BPM), as MP3 and as WAV, with hotcue 1 on the click at
-8.0 s and a 4-beat saved loop at 16.0 s. Exported and opened in each app at full zoom, hotcue 1
-must sit on the click's start. If an app ever shows a shift, change that app's constant in
-`crates/interop/src/export/timing.rs` and repeat the click-track check.
+| MP3 header | Serato | rekordbox |
+| --- | --- | --- |
+| Info frame, MPEG-1 (32, 44.1 and 48 kHz) | 50 ms, a fixed time | the encoder delay plus one frame (1152 samples): about 51 ms at 44.1 kHz, 47 ms at 48 kHz |
+| Info frame, `Lavc` (FFmpeg) tag | 50 ms | the encoder delay only: about 25 ms |
+| Info frame, MPEG-2 (22.05 kHz) | 50 ms plus one frame (576 samples): about 76 ms | the encoder delay plus one frame (576 samples): about 76 ms |
+| No Info frame | none | none |
+| VirtualDJ, any file | none | none |
+
+VirtualDJ's row is its 11a import, which lined up with no shift. A tag from an unknown
+encoder is treated like a LAME one in rekordbox. The 22.05 kHz Serato value rests on one file.
+Reading a guest stick undoes the same shift, so a cue lands where the app shows it. A cue or
+loop that would fall before Open Jockey's start is kept at 0; a first beat is never moved up
+to 0, so the grid keeps its phase.
+
+Re-exporting needs nothing special: an MP3 on the stick whose Serato tags differ from what
+would be written now is retagged, and `rekordbox.xml` is written again every time. So a stick
+made before this change gets the new positions on the next export, and the VirtualDJ files and
+the WAV tags do not change.
+
+The numbers come from the OJCAL stick (`crates/interop/tests/fixtures/ojcal`, with the design
+in `docs/superpowers/specs/2026-11-18-mp3-offsets-design.md`): eight click files, each made
+by a different encoder or at a different rate, opened in Serato DJ Lite and rekordbox 7.2.19.
+If a measurement ever contradicts a row, the measurement wins: change
+`crates/interop/src/export/timing.rs` and this table together, and repeat the hands-on in
+the fixture's README.
 
 Two things the hands-on checked or still has to check:
 
