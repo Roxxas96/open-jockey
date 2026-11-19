@@ -41,6 +41,11 @@ mod tests {
     use super::*;
 
     fn track(kind: FileKind, gapless_header: bool) -> ExportTrack {
+        let frame_samples = if matches!(kind, FileKind::Mp3) {
+            1152
+        } else {
+            0
+        };
         ExportTrack {
             id: 1,
             path: PathBuf::from("a"),
@@ -61,9 +66,10 @@ mod tests {
             lead_in: LeadIn {
                 gapless_header,
                 delay_frames: 0,
+                // An MP3 with a gapless header has a LAME Info frame; other kinds have none.
                 info_frame: gapless_header,
-                info_encoder: None,
-                frame_samples: 0,
+                info_encoder: gapless_header.then_some(decode::InfoEncoder::Lame),
+                frame_samples,
             },
         }
     }

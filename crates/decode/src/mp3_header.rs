@@ -8,6 +8,10 @@ use crate::InfoEncoder;
 /// How far past the ID3v2 tag the first frame is looked for.
 const SEARCH_BYTES: u64 = 64 * 1024;
 
+/// The longest Layer III frame (MPEG-1, 320 kb/s, 32 kHz, padded: 1441 bytes) plus a
+/// header: read past the window so a candidate near its end still has its next frame checked.
+const MAX_FRAME_BYTES: u64 = 1441 + 4;
+
 /// The encoder string sits this far past the "Xing"/"Info" tag (LAME's layout), 9 bytes long.
 const ENCODER_OFFSET: usize = 120;
 const ENCODER_LEN: usize = 9;
@@ -21,6 +25,8 @@ pub(crate) struct FirstFrame {
     pub info_encoder: Option<InfoEncoder>,
     /// Samples per frame: 1152 for MPEG-1, 576 for MPEG-2 and 2.5.
     pub frame_samples: u32,
+    /// Where the frame starts in the file, in bytes.
+    pub offset: u64,
 }
 
 /// A Layer III frame header.
@@ -85,20 +91,31 @@ pub(crate) fn first_frame<R: Read + Seek>(r: &mut R) -> Option<FirstFrame> {
         let size = id3[6..10]
             .iter()
             .fold(0u64, |acc, &b| (acc << 7) | u64::from(b & 0x7F));
-        let footer = if id3[5] & 0x10 != 0 { 10 } else { 0 };
+        // Only ID3v2.4 defines a footer; the bit is undefined in earlier versions.
+        let footer = if id3[3] >= 4 && id3[5] & 0x10 != 0 {
+            10
+        } else {
+            0
+        };
         10 + size + footer
     } else {
         0
     };
     r.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    r.take(SEARCH_BYTES).read_to_end(&mut bytes).ok()?;
-    scan(&bytes)
+    let wanted = SEARCH_BYTES + MAX_FRAME_BYTES;
+    r.take(wanted).read_to_end(&mut bytes).ok()?;
+    let at_eof = (bytes.len() as u64) < wanted;
+    scan(&bytes, at_eof).map(|(at, f)| FirstFrame {
+        offset: start + at as u64,
+        ..f
+    })
 }
 
-/// Finds the first frame in `bytes`: a valid header whose next frame also syncs (or would
-/// start past the bytes there are).
-fn scan(bytes: &[u8]) -> Option<FirstFrame> {
+/// Finds the first frame in `bytes`: a valid header whose next frame also syncs. A next
+/// frame past the bytes there are only counts when they end at the end of the file
+/// (`at_eof`); otherwise the candidate is rejected.
+fn scan(bytes: &[u8], at_eof: bool) -> Option<(usize, FirstFrame)> {
     (0..bytes.len()).find_map(|at| {
         let head = header(&bytes[at..])?;
         let next_at = at + head.len;
@@ -107,18 +124,26 @@ fn scan(bytes: &[u8]) -> Option<FirstFrame> {
             if next.mpeg1 != head.mpeg1 || next.sample_rate != head.sample_rate {
                 return None;
             }
+        } else if !at_eof {
+            return None;
         }
-        Some(read_frame(&bytes[at..], head))
+        let end = next_at.min(bytes.len());
+        Some((at, read_frame(&bytes[at..end], head)))
     })
 }
 
-/// Reads the Xing/Info tag and its encoder string from the frame at the start of `frame`.
+/// Reads the Xing/Info tag and its encoder string from `frame`, which holds that frame's
+/// bytes and no more, so neither read runs on into the next frame.
 fn read_frame(frame: &[u8], head: Header) -> FirstFrame {
     let side_info = match (head.mpeg1, head.mono) {
         (true, false) => 32,
         (true, true) | (false, false) => 17,
         (false, true) => 9,
     };
+    // A CRC-protected frame (protection bit clear) has 2 CRC bytes after its header, which
+    // would put the tag 2 bytes later. Encoders write the Xing/Info frame unprotected, and
+    // symphonia (which trims the delay in `decode_file`) reads the tag at this offset
+    // whatever the bit, so it is ignored here too: both must agree on which files have one.
     let tag_at = 4 + side_info;
     let info_frame = matches!(frame.get(tag_at..tag_at + 4), Some(b"Xing" | b"Info"));
     let encoder_at = tag_at + ENCODER_OFFSET;
@@ -130,6 +155,7 @@ fn read_frame(frame: &[u8], head: Header) -> FirstFrame {
         info_frame,
         info_encoder,
         frame_samples: if head.mpeg1 { 1152 } else { 576 },
+        offset: 0,
     }
 }
 
@@ -226,12 +252,28 @@ mod tests {
         tag
     }
 
-    /// A text frame whose body holds a fake MPEG-1 Layer III frame sync.
-    fn frame_with_fake_sync() -> Vec<u8> {
-        let body = b"\x03\xFF\xFB\x90\x00fake";
-        let mut f = b"TIT2".to_vec();
-        f.extend_from_slice(&[0, 0, 0, body.len() as u8, 0, 0]);
-        f.extend_from_slice(body);
+    /// Two back-to-back plain MPEG-1 frames: a false sync that passes the next-frame check.
+    fn fake_frame_pair() -> Vec<u8> {
+        let mut pair = info_frame(b"\0\0\0\0", b"");
+        pair.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+        pair
+    }
+
+    /// A `PRIV` frame (ID3v2.4, syncsafe size) whose body holds [`fake_frame_pair`].
+    fn priv_frame_with_fake_frames() -> Vec<u8> {
+        let mut body = b"owner\0".to_vec();
+        body.extend_from_slice(&fake_frame_pair());
+        let n = body.len();
+        let mut f = b"PRIV".to_vec();
+        f.extend_from_slice(&[
+            ((n >> 21) & 0x7F) as u8,
+            ((n >> 14) & 0x7F) as u8,
+            ((n >> 7) & 0x7F) as u8,
+            (n & 0x7F) as u8,
+            0,
+            0,
+        ]);
+        f.extend_from_slice(&body);
         f
     }
 
@@ -250,16 +292,83 @@ mod tests {
 
     #[test]
     fn junk_and_padding_before_the_first_frame() {
-        let mut bytes = id3v24(&frame_with_fake_sync(), 300, true);
+        // An ID3v2.4 tag whose frame body and padding each hold a false sync that would pass
+        // the next-frame check, so only skipping the tag by its size (padding included)
+        // avoids them; then its footer.
+        let mut body = priv_frame_with_fake_frames();
+        body.extend_from_slice(&[0; 40]);
+        body.extend_from_slice(&fake_frame_pair());
+        let mut bytes = id3v24(&body, 30, true);
         // Junk after the tag, with a sync whose "next frame" lands inside the real one.
         bytes.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00, 0, 0, 0]);
+        let real_at = bytes.len() as u64;
         bytes.extend_from_slice(&info_frame(b"Info", b"LAME3.100"));
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+
+        let f = first_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(f.offset, real_at);
+        assert!(f.info_frame);
+        assert_eq!(f.info_encoder, Some(InfoEncoder::Lame));
+        assert_eq!(f.frame_samples, 1152);
+    }
+
+    #[test]
+    fn a_frame_without_a_footer_is_found_where_the_tag_ends() {
+        let mut bytes = id3v24(b"", 20, false);
+        let real_at = bytes.len() as u64;
+        bytes.extend_from_slice(&info_frame(b"Info", b"LAME3.100"));
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
+
+        let f = first_frame(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(f.offset, real_at);
+        assert!(f.info_frame);
+    }
+
+    #[test]
+    fn footer_flag_counts_only_in_id3v24() {
+        // ID3v2.3 has no footer; the 0x10 flag bit there must not skip 10 bytes of audio.
+        let mut bytes = b"ID3\x03\x00\x10\x00\x00\x00\x14".to_vec();
+        bytes.resize(10 + 20, 0);
+        bytes.extend_from_slice(&info_frame(b"Info", b"LAME3.100"));
+        bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
         bytes.extend_from_slice(&info_frame(b"\0\0\0\0", b""));
 
         let f = first_frame(&mut Cursor::new(bytes)).unwrap();
         assert!(f.info_frame);
         assert_eq!(f.info_encoder, Some(InfoEncoder::Lame));
-        assert_eq!(f.frame_samples, 1152);
+    }
+
+    #[test]
+    fn the_encoder_read_stays_inside_its_frame() {
+        // MPEG-1, 32 kb/s, 44.1 kHz joint stereo: 104 bytes, too short for the encoder
+        // string at 36 + 120. The next frame holds "LAME" where that string would be.
+        let frame = |tag: &[u8; 4]| {
+            let mut f = vec![0xFF, 0xFB, 0x10, 0x40];
+            f.resize(4 + 32, 0);
+            f.extend_from_slice(tag);
+            f.resize(104, 0);
+            f
+        };
+        let mut bytes = frame(b"Info");
+        bytes.extend_from_slice(&frame(b"\0\0\0\0"));
+        bytes[4 + 32 + 120..4 + 32 + 120 + 9].copy_from_slice(b"LAME3.100");
+        bytes.extend_from_slice(&frame(b"\0\0\0\0"));
+
+        let f = first_frame(&mut Cursor::new(bytes)).unwrap();
+        assert!(f.info_frame);
+        assert_eq!(f.info_encoder, None);
+    }
+
+    #[test]
+    fn a_lone_sync_at_the_search_window_edge_is_not_a_frame() {
+        // Past the window the file goes on (zeros), so the sync's next frame is checkable
+        // there and is not a frame.
+        let window = usize::try_from(SEARCH_BYTES).unwrap();
+        let mut bytes = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+        bytes.resize(10 + window + 4096, 0);
+        bytes[10 + window - 10..10 + window - 6].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x40]);
+
+        assert_eq!(first_frame(&mut Cursor::new(bytes)), None);
     }
 
     #[test]
