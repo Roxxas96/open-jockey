@@ -232,7 +232,7 @@ noticed that loading a track takes a few seconds.
 
 Owner, 2026-11-10 and 11 (macOS; Serato DJ Lite, Rekordbox, VirtualDJ 2026). Playlists showed
 in order in all three, and hotcue positions were exact in all three (Serato MP3 with an Info
-frame 1152 frames later, the others unshifted). Exporting again copied nothing new and showed
+frame 1152 frames later, the others unshifted; this was resolved by the MP3 offsets change, 2026-11-19, see `docs/interop.md`). Exporting again copied nothing new and showed
 a moved hotcue; an unticked playlist disappeared from all three. Serato showed a repeated
 track once (its limit; the export now says so) and has no saved loops in DJ Lite (Pro only,
 not checked). Rekordbox imported the playlists through the XML; the steps are now in
@@ -257,6 +257,7 @@ frames) after the decoded audio on the fixture's MP3s, while import and export s
 frames, so Serato MP3 cues sit about 29 ms late. rekordbox's `Inizio="0.024"` hints its MP3
 positions may be about 25 ms off too. Too small to see at normal zoom; the fix needs
 calibration MP3s analysed by Serato and rekordbox.
+Resolved by the MP3 offsets change (2026-11-19); see `docs/interop.md`, Timing.
 
 ### Hands-on check (plan 12a: compact window)
 
