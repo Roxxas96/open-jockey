@@ -45,12 +45,12 @@ fn ojcal_onsets_in_our_decode() {
     for name in TRIMMED {
         let onset = onset_frames(&fixture(name));
         println!("{name}: onset {onset} frames");
-        assert!(onset <= 2, "{name}: onset {onset} frames");
+        assert_eq!(onset, 1, "{name}: onset {onset} frames");
     }
     for name in UNTRIMMED {
         let onset = onset_frames(&fixture(name));
         println!("{name}: onset {onset} frames");
-        assert!(onset.abs_diff(1105) <= 2, "{name}: onset {onset} frames");
+        assert_eq!(onset, 1106, "{name}: onset {onset} frames");
     }
 }
 
@@ -304,7 +304,10 @@ fn audio_names() -> Vec<String> {
     names
 }
 
-/// Serato's hot cue 1 (ms) for the files that have one (README).
+/// How far in the exported hot cue 1 and loop sit from the click, in ms (see `planned`).
+const IN_MS: f64 = 500.0;
+
+/// Serato's hot cue 1 (ms) for the files that have one (README), at the click.
 const SERATO_CUE_MS: [(&str, f64); 5] = [
     ("OJ Cal 01", 51.0),
     ("OJ Cal 02", 27.0),
@@ -348,8 +351,9 @@ fn raw(lib: &Library, sql: &str, params: Vec<Value>) {
         .unwrap();
 }
 
-/// Gathers the eight fixture tracks from a library, gives each a hot cue and a first beat on
-/// its click, and plans the export to an empty stick.
+/// Gathers the eight fixture tracks from a library, gives each a first beat on its click, a
+/// hot cue 1 and a saved loop (slot 2) half a second in, and plans the export to an empty stick.
+/// Half a second in, so a position that comes back early does not clamp at 0 and hide.
 fn planned() -> Exported {
     let dir = tempfile::tempdir().unwrap();
     let music = dir.path().join("music");
@@ -393,9 +397,16 @@ fn planned() -> Exported {
         let click = clicks[&prefix_of(&t.path)] as f64;
         t.bpm = Some(120.0);
         t.first_beat_frames = Some(click);
+        let in_half_second = click + f64::from(t.sample_rate) / 2.0;
         t.hotcues[0] = Some(HotcuePoint {
-            frames: click,
+            frames: in_half_second,
             loop_frames: None,
+            color: None,
+            name: None,
+        });
+        t.hotcues[1] = Some(HotcuePoint {
+            frames: in_half_second,
+            loop_frames: Some(f64::from(t.sample_rate) / 4.0),
             color: None,
             name: None,
         });
@@ -419,9 +430,20 @@ fn export_fixture() -> Exported {
 
 /// `Inizio` per file prefix, from the exported `rekordbox.xml`.
 fn inizios(stick: &Path) -> BTreeMap<String, f64> {
+    rekordbox_times(stick).0
+}
+
+/// `Start` of each numbered `POSITION_MARK` per file prefix, from the exported `rekordbox.xml`.
+fn mark_starts(stick: &Path) -> BTreeMap<(String, i32), f64> {
+    rekordbox_times(stick).1
+}
+
+/// The `Inizio` per file prefix and the `Start` per (prefix, `Num`) of the exported XML.
+fn rekordbox_times(stick: &Path) -> (BTreeMap<String, f64>, BTreeMap<(String, i32), f64>) {
     let text = fs::read_to_string(stick.join("Open Jockey").join("rekordbox.xml")).unwrap();
     let mut location = String::new();
     let mut out = BTreeMap::new();
+    let mut marks = BTreeMap::new();
     let mut reader = quick_xml::Reader::from_str(&text);
     loop {
         match reader.read_event().unwrap() {
@@ -452,6 +474,18 @@ fn inizios(stick: &Path) -> BTreeMap<String, f64> {
                             attr("Inizio").unwrap().parse().unwrap(),
                         );
                     }
+                    "POSITION_MARK" => {
+                        let name = percent_encoding::percent_decode_str(
+                            location.rsplit('/').next().unwrap(),
+                        )
+                        .decode_utf8_lossy()
+                        .into_owned();
+                        let num: i32 = attr("Num").unwrap().parse().unwrap();
+                        marks.insert(
+                            (name[..9].to_owned(), num),
+                            attr("Start").unwrap().parse().unwrap(),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -459,7 +493,7 @@ fn inizios(stick: &Path) -> BTreeMap<String, f64> {
             _ => {}
         }
     }
-    out
+    (out, marks)
 }
 
 /// The exported copy of the file with this prefix.
@@ -504,14 +538,31 @@ fn an_ojcal_export_writes_what_each_app_wrote() {
     let e = export_fixture();
     for (prefix, want) in SERATO_CUE_MS {
         let ms = serato_cue_ms(&copy_of(&e, prefix));
-        println!("serato {prefix}: wrote {ms} ms, Serato wrote {want} ms");
-        assert!((ms - want).abs() <= 2.0, "{prefix}: {ms} vs {want}");
+        println!("serato {prefix}: wrote {ms} ms, Serato wrote {want} ms (+ {IN_MS})");
+        assert!(
+            (ms - (want + IN_MS)).abs() <= 2.0,
+            "{prefix}: {ms} vs {want} + {IN_MS}"
+        );
     }
     let wrote = inizios(&e.stick);
     for (prefix, want) in INIZIO {
         let got = wrote[prefix];
         println!("rekordbox {prefix}: wrote {got} s, rekordbox wrote {want} s");
         assert!((got - want).abs() <= 0.0015, "{prefix}: {got} vs {want}");
+    }
+    // The hot cue and the loop sit half a second past the click: rekordbox's POSITION_MARK is
+    // its Inizio plus 0.5 s, on the same (measured) timeline (R1: 1.5 ms).
+    let starts = mark_starts(&e.stick);
+    for (prefix, inizio) in INIZIO {
+        for num in [0, 1] {
+            let got = starts[&(prefix.to_owned(), num)];
+            let want = inizio + IN_MS / 1000.0;
+            println!("rekordbox {prefix} mark {num}: wrote {got} s, Inizio + 0.5 = {want} s");
+            assert!(
+                (got - want).abs() <= 0.0015,
+                "{prefix} mark {num}: {got} vs {want}"
+            );
+        }
     }
 }
 
@@ -536,17 +587,32 @@ fn export_then_guest_read_returns_the_same_frames() {
             let prefix = prefix_of(&track.path);
             let click = e.clicks[&prefix] as f64;
             let rate = f64::from(library::tags::read(&track.path).sample_rate.unwrap());
-            // Serato rounds to 1 ms; rekordbox's seconds have 3 decimals and the XML 1.5 ms (R1).
-            let tol = if app == GuestApp::Serato { 1.02 } else { 1.5 } * rate / 1000.0;
+            // Our own export read back by our own reader: no rekordbox or Serato bias is
+            // involved (so not R1's 1.5 ms), only the storage rounding. Serato stores whole
+            // ms and rekordbox 3-decimal seconds, so half a ms, plus one frame for the
+            // frame-to-seconds-to-frame rounding.
+            let tol = 0.0005 * rate + 1.0;
+            let at = click + rate / 2.0;
             let cue = track.hotcues.iter().find(|c| c.slot == 0).unwrap();
             let back = cue.seconds * rate;
             println!(
-                "{app:?} {prefix}: cue {back:.1} first {:?} want {click}",
+                "{app:?} {prefix}: cue {back:.1} first {:?} want {at}",
                 track.first_beat.map(|f| f * rate)
             );
             assert!(
-                (back - click).abs() <= tol,
-                "{app:?} {prefix}: cue {back} vs {click}"
+                (back - at).abs() <= tol,
+                "{app:?} {prefix}: cue {back} vs {at}"
+            );
+            let saved_loop = track.hotcues.iter().find(|c| c.slot == 1).unwrap();
+            assert!(
+                (saved_loop.seconds * rate - at).abs() <= tol,
+                "{app:?} {prefix}: loop {} vs {at}",
+                saved_loop.seconds * rate
+            );
+            assert!(
+                (saved_loop.loop_seconds.unwrap() * rate - rate / 4.0).abs() <= 2.0 * tol,
+                "{app:?} {prefix}: loop length {:?}",
+                saved_loop.loop_seconds
             );
             let first = track.first_beat.unwrap() * rate;
             assert!(
@@ -597,19 +663,12 @@ fn a_re_export_moves_only_mp3_serato_and_rekordbox_positions() {
         );
         let mut old: ExportTrack = t.clone();
         let click = old.first_beat_frames.unwrap();
-        let old_frames = if t.lead_in.info_frame {
-            click + 1152.0
-        } else {
-            click
-        };
+        let old_shift = if t.lead_in.info_frame { 1152.0 } else { 0.0 };
         old.lead_in = decode::LeadIn::default();
-        old.first_beat_frames = Some(old_frames);
-        old.hotcues[0] = Some(HotcuePoint {
-            frames: old_frames,
-            loop_frames: None,
-            color: None,
-            name: None,
-        });
+        old.first_beat_frames = Some(click + old_shift);
+        for point in old.hotcues.iter_mut().flatten() {
+            point.frames += old_shift;
+        }
         write_tags(&copy, &old).unwrap();
         // rekordbox: the old export had no shift, so its seconds are the plain frames.
         let prefix = prefix_of(&t.path);
@@ -668,7 +727,7 @@ fn a_re_export_moves_only_mp3_serato_and_rekordbox_positions() {
     }
     for (prefix, want) in SERATO_CUE_MS {
         assert!(
-            (serato_cue_ms(&copy_of(&e, prefix)) - want).abs() <= 2.0,
+            (serato_cue_ms(&copy_of(&e, prefix)) - (want + IN_MS)).abs() <= 2.0,
             "{prefix}"
         );
     }
