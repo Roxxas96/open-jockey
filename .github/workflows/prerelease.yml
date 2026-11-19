@@ -24,7 +24,8 @@ jobs:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      # Pinned: this job can write releases.
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5
       - run: cargo build --release --locked -p open-jockey
       # Shows which DLLs the exe needs, so a missing one is visible in the log.
       - name: List DLL dependencies
