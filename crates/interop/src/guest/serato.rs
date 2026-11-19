@@ -294,7 +294,10 @@ fn tags_of(path: &Path) -> (Vec<GuestCue>, Option<(f64, f64)>) {
     let cues = markers.map_or_else(Vec::new, |data| {
         cues_from_markers(read_markers2(&data), shift)
     });
-    (cues, grid.map(|(first, bpm)| (first - shift, bpm)))
+    (
+        cues,
+        grid.map(|(first, bpm)| ((first - shift).max(0.0), bpm)),
+    )
 }
 
 /// The first beat (seconds) and BPM of a `Serato Tempo Map` frame, as Serato DJ writes it
