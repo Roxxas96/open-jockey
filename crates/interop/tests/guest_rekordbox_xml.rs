@@ -98,8 +98,10 @@ fn rekordbox_xml_uses_its_grid_even_when_wrong() {
     assert_eq!(t120.first_beat, Some(0.015));
     // Only the first TEMPO counts.
     let t126 = by_title(source, "OJ Click 126");
-    // 0.024 s less the 1105-frame (25.06 ms) shift of a Lavc MP3 is before our 0: clamped.
-    assert_eq!(t126.first_beat, Some(0.0));
+    // 0.024 s less the 1105-frame (25.06 ms) shift of a Lavc MP3: before our 0, and kept
+    // (a beat grid is periodic, so a negative first beat is valid).
+    let want = 0.024 - 1105.0 / 44_100.0;
+    assert!((t126.first_beat.unwrap() - want).abs() < 1e-9);
 }
 
 #[test]

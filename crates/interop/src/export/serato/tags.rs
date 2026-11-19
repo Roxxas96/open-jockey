@@ -42,6 +42,10 @@ fn format_error(path: &Path, why: impl ToString) -> ExportError {
 ///
 /// # Errors
 /// [`ExportError`] when the file cannot be opened or parsed.
+///
+/// Audio properties are not read, so an MP3 whose audio frames are unreadable still gives its
+/// tag. `needs_tagging` therefore says `false` for such a file with the right Serato frames,
+/// where it used to fail the read (and `write_tags` still fails on it).
 pub(crate) fn read_id3(copy: &Path, kind: &FileKind) -> Result<Option<Id3v2Tag>, ExportError> {
     let mut file = File::open(copy).map_err(|source| ExportError::Io {
         path: copy.to_path_buf(),
