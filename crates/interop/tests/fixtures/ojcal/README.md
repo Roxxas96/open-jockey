@@ -63,3 +63,20 @@ trimmed files and the WAV, and 1105 + 1 = 1106 for 02 and 05, as the design's ru
   entry in each `ANLZ0000.DAT` (all at 120.00 BPM); it equals `Inizio` on every file, so the device export and the
   XML share one timeline. The ANLZ files hold no cues. The ANLZ folders map to files as P07A 00, P072 01, P01E 02,
   P028 03, P004 04, P020 05, P009 06, P051 07.
+
+## Hands-on: checking an export against Serato and rekordbox
+
+Do this after a change to `export/timing.rs`, with the OJCAL files in a library:
+
+1. In Open Jockey, put hot cue 1 on the first click of each OJ Cal track (the click is at the very start
+   of the decode, apart from files 02 and 05, where it sits about 25 ms in), then export a playlist of the
+   eight to a stick.
+2. Open the stick in Serato DJ Lite, and its `Open Jockey/rekordbox.xml` in rekordbox (see
+   `IMPORT TO REKORDBOX.txt`). Zoom right in. In both, cue 1 sits on the click start for 01, 03, 06 and 02.
+3. Plug the exported stick back in as a guest (a stick copy of `rekordbox.xml` at its root for rekordbox).
+   Open Jockey's cues sit on the clicks.
+4. Record what you see in `controllers/ddj-sb3/README.md`.
+
+`cargo test -p interop --test ojcal` checks the same thing without the apps: the exported Serato cue
+milliseconds and `Inizio` equal the values in the table above (Serato within 2 ms, rekordbox within
+1.5 ms), and reading the exported stick back returns the original frames.
