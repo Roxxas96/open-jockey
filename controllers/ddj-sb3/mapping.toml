@@ -95,14 +95,13 @@ midi = { channel = 1, note = 0x60 }
 action = "deck.tempo_range_next"
 side = "left"
 
-# TEMPO: the capture reached 0 with the slider pulled fully toward the player, which is
-# the "+" (faster) end, so the value is inverted. Confirmed on the owner's SB3 in the
-# hands-on check: toward you is faster.
+# TEMPO: toward the player (the printed "+" end) is faster, so the value is not inverted.
+# An earlier inversion was wrong (the capture only covers part of the travel); corrected
+# on 2026-11-19 from the owner's report that pulling toward them slowed the track.
 [[input]]
 midi = { channel = 1, cc14 = [0x00, 0x20] }
 action = "deck.tempo"
 side = "left"
-invert = true
 
 # --------------------------------------------------------------- right deck (2 / 4)
 
@@ -138,12 +137,11 @@ midi = { channel = 2, note = 0x60 }
 action = "deck.tempo_range_next"
 side = "right"
 
-# TEMPO: inverted, as on the left deck.
+# TEMPO: not inverted, as on the left deck.
 [[input]]
 midi = { channel = 2, cc14 = [0x00, 0x20] }
 action = "deck.tempo"
 side = "right"
-invert = true
 
 # ------------------------------------------------------- mixer, left channel (1 / 3)
 

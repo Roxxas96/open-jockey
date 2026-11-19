@@ -57,7 +57,7 @@ point you set is remembered and comes back when the track is loaded again. See
 | PLAY/PAUSE | play/pause |
 | CUE | cue (hold to preview when paused at the cue point) |
 | SHIFT + CUE | return to the start of the track |
-| TEMPO slider | tempo; toward you is faster (checked on the owner's SB3) |
+| TEMPO slider | tempo; toward you is faster (the mapping had it inverted until the owner's report of 2026-11-19) |
 | KEY LOCK | keylock on or off (the deck keeps its pitch when the tempo is not 0 %) |
 | FX 1, 2, 3 | switch the effect in that slot on or off on the side's deck (which effect: `[fx] slots` in `docs/config.md`) |
 | FX LEVEL | how much of the deck's effects is heard (soft takeover) |

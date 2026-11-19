@@ -822,8 +822,9 @@ fn shift_cue_returns_to_start_but_cue_alone_previews() {
 
 #[test]
 fn tempo_slider_toward_you_is_faster() {
-    // The capture's tempo slider reached 0 when pulled fully toward the player, which is
-    // the "+" end on Pioneer controllers. Checked on every deck, each in its DECK state.
+    // Toward the player is the "+" end on Pioneer controllers, and the SB3 sends its highest
+    // value there (owner's report, 2026-11-19; the capture covers only part of the
+    // travel). Checked on every deck, each in its DECK state.
     for (n, layer) in [
         (1, Main),
         (2, Main),
@@ -838,10 +839,11 @@ fn tempo_slider_toward_you_is_faster() {
         let tempo = rig.control(&id).messages.clone();
         let msb_max = tempo.iter().find(|m| m.data1 == 0x00).unwrap().max;
         let lsb_max = tempo.iter().find(|m| m.data1 == 0x20).unwrap().max;
-        // Start from the captured maximum (soft takeover picks the slider up near or
-        // across the middle), then pull it to 0.
+        // Start from 0, move through the captured maximum (soft takeover picks the slider
+        // up near or across the middle), then pull it fully toward the player.
+        rig.cc14(&id, 0, 0);
         rig.cc14(&id, msb_max, lsb_max);
-        let actions = rig.cc14(&id, 0, 0);
+        let actions = rig.cc14(&id, 0x7F, 0x7F);
         assert!(
             actions.contains(&Action::Tempo(d(n))),
             "deck {n}: {actions:?}"
@@ -849,7 +851,7 @@ fn tempo_slider_toward_you_is_faster() {
         let ratio = rig.engine.deck(d(n)).tempo_ratio;
         assert!(
             ratio > 1.0,
-            "deck {n}: slider at 0 (toward you) gives ratio {ratio}"
+            "deck {n}: slider at the top value (toward you) gives ratio {ratio}"
         );
         for other in (1..=4).filter(|&o| o != n) {
             assert_eq!(rig.engine.deck(d(other)).tempo_ratio, 1.0, "deck {other}");
