@@ -105,14 +105,15 @@ the app shows a position this much later than Open Jockey does:
 
 | MP3 header | Serato | rekordbox |
 | --- | --- | --- |
-| Info frame, MPEG-1 (32, 44.1 and 48 kHz) | 50 ms, a fixed time | the encoder delay plus one frame (1152 samples): about 51 ms at 44.1 kHz, 47 ms at 48 kHz |
-| Info frame, `Lavc` (FFmpeg) tag | 50 ms | the encoder delay only: about 25 ms |
-| Info frame, MPEG-2 (22.05 kHz) | 50 ms plus one frame (576 samples): about 76 ms | the encoder delay plus one frame (576 samples): about 76 ms |
+| Info frame, MPEG-1 (32, 44.1 and 48 kHz) | 50 ms, a fixed time | the delay our decoder trims (encoder delay + 529 decoder delay) plus one frame (1152 samples): about 51 ms at 44.1 kHz, 47 ms at 48 kHz |
+| Info frame, `Lavc` (FFmpeg) tag | 50 ms | the delay our decoder trims (encoder delay + 529 decoder delay) only: about 25 ms |
+| Info frame, MPEG-2 and 2.5 (24 kHz and below) | 50 ms plus one frame (576 samples): about 76 ms at 22.05 kHz | the delay our decoder trims (encoder delay + 529 decoder delay) plus one frame (576 samples): about 76 ms at 22.05 kHz |
 | No Info frame | none | none |
-| VirtualDJ, any file | none | none |
 
-VirtualDJ's row is its 11a import, which lined up with no shift. A tag from an unknown
-encoder is treated like a LAME one in rekordbox. The 22.05 kHz Serato value rests on one file.
+VirtualDJ's 11a import lined up with no shift, so it gets none. A tag from an unknown
+encoder is treated like a LAME one in rekordbox. A `Lavf` tag (FFmpeg's muxer, as in a stream
+copy) is treated like `Lavc`, by reasoning, not measurement. `Lavc` or `Lavf` on an MPEG-2 or 2.5
+file is unmeasured too. The 22.05 kHz Serato value rests on one file.
 Reading a guest stick undoes the same shift, so a cue lands where the app shows it. A cue or
 loop that would fall before Open Jockey's start is kept at 0; a first beat is never moved up
 to 0, so the grid keeps its phase.

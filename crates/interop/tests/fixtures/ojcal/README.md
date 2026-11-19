@@ -72,11 +72,13 @@ Do this after a change to `export/timing.rs`, with the OJCAL files in a library:
    of the decode, apart from files 02 and 05, where it sits about 25 ms in), then export a playlist of the
    eight to a stick.
 2. Open the stick in Serato DJ Lite, and its `Open Jockey/rekordbox.xml` in rekordbox (see
-   `IMPORT TO REKORDBOX.txt`). Zoom right in. In both, cue 1 sits on the click start for 01, 03, 06 and 02.
+   `IMPORT TO REKORDBOX.txt`). Zoom right in. In both, cue 1 sits on the click start for all eight files; look hardest at 07
+   (MPEG-2, one data point) and 04 (Xing VBR).
 3. Plug the exported stick back in as a guest (a stick copy of `rekordbox.xml` at its root for rekordbox).
    Open Jockey's cues sit on the clicks.
 4. Record what you see in `controllers/ddj-sb3/README.md`.
 
 `cargo test -p interop --test ojcal` checks the same thing without the apps: the exported Serato cue
 milliseconds and `Inizio` equal the values in the table above (Serato within 2 ms, rekordbox within
-1.5 ms), and reading the exported stick back returns the original frames.
+1.5 ms), and reading the exported stick back returns the original frames within half a millisecond plus one
+frame (the storage rounding; the test puts cue 1 and a loop half a second past the click).
