@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use crate::export::FileKind;
-use crate::export::timing::{App, ours_seconds};
+use crate::export::timing::{App, app_offset_seconds};
 
 pub(crate) mod anlz;
 mod pdb;
@@ -189,7 +189,8 @@ fn track_from_tags(path: PathBuf) -> GuestTrack {
 
 /// Moves a rekordbox track's marks from rekordbox's timeline onto Open Jockey's: the first
 /// beat, the main cue and every hotcue start, less the app's offset for the file (an MP3's
-/// `lead_in` is read once). A mark that lands before our 0 is clamped to 0, not dropped; loop
+/// `lead_in` is read once). A cue that lands before our 0 is clamped to 0, not dropped; the
+/// first beat is not clamped (a grid is periodic, so a negative phase is valid); loop
 /// lengths are durations and stay as they are. A file whose `lead_in` or rate cannot be read
 /// gets no shift.
 fn rekordbox_to_ours(track: &mut GuestTrack) {
@@ -203,9 +204,10 @@ fn rekordbox_to_ours(track: &mut GuestTrack) {
     ) else {
         return;
     };
-    let ours =
-        |seconds: f64| ours_seconds(App::Rekordbox, seconds, kind.clone(), &lead_in, rate).max(0.0);
-    track.first_beat = track.first_beat.map(ours);
+    let offset = app_offset_seconds(App::Rekordbox, kind, &lead_in, rate);
+    let ours = |seconds: f64| (seconds - offset).max(0.0);
+    // The first beat is a grid phase, not a position: it keeps any negative value.
+    track.first_beat = track.first_beat.map(|s| s - offset);
     track.main_cue = track.main_cue.map(ours);
     for cue in &mut track.hotcues {
         cue.seconds = ours(cue.seconds);

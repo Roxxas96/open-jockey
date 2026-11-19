@@ -72,7 +72,8 @@ fn device_grid_from_anlz() {
     assert!((bpm("OJ Click 126") - 126.0).abs() < 1e-9);
     assert!((bpm("OJ Click 128") - 128.0).abs() < 1e-9);
     for track in &source.tracks {
-        assert!(track.first_beat.is_some_and(|b| (0.0..1.0).contains(&b)));
+        // An MP3's shifted first beat may sit a few ms before our 0 (it is not clamped).
+        assert!(track.first_beat.is_some_and(|b| (-0.01..1.0).contains(&b)));
     }
 }
 

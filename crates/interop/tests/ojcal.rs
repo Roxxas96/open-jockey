@@ -84,6 +84,15 @@ fn click_seconds(path: &Path) -> f64 {
     (onset_frames(path) - 1) as f64 / f64::from(rate)
 }
 
+/// rekordbox's first beat (README) less the offset the rule gives for the file, unclamped.
+const SHIFTED_FIRST_BEAT: [(&str, f64); 5] = [
+    ("OJ Cal 01", 0.024 - 1105.0 / 44_100.0),
+    ("OJ Cal 03", 0.051 - 2257.0 / 44_100.0),
+    ("OJ Cal 04", 0.051 - 2257.0 / 44_100.0),
+    ("OJ Cal 06", 0.046 - 2257.0 / 48_000.0),
+    ("OJ Cal 07", 0.076 - 1681.0 / 22_050.0),
+];
+
 #[test]
 fn a_guest_ojcal_stick_puts_every_mark_on_its_click() {
     let dir = tempfile::tempdir().unwrap();
@@ -131,7 +140,22 @@ fn a_guest_ojcal_stick_puts_every_mark_on_its_click() {
                 "{app:?} {:?}: beat {first} click {click} err {err:+.4}",
                 track.path.file_name().unwrap()
             );
-            assert!(first >= 0.0);
+            // Not clamped: the grid keeps its phase, so the shifted first beat may be negative.
+            // The shifted value is rekordbox's own (README) less the measured offset.
+            let name = track
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let real = SHIFTED_FIRST_BEAT.iter().find(|(p, _)| name.starts_with(p));
+            if let Some((_, want)) = real {
+                assert!(
+                    (first - want).abs() < 1e-9,
+                    "{app:?} {name}: {first} != {want}"
+                );
+            }
+            assert_eq!(beats, 0.0, "{app:?} {:?}: {first}", track.path);
             assert!(err.abs() <= 0.0015, "{app:?} {:?}: {err}", track.path);
         }
     }
@@ -209,4 +233,50 @@ fn an_unreadable_mp3_header_gets_no_shift() {
         "{} != {want}",
         cue.seconds
     );
+}
+
+#[test]
+fn an_unreadable_mp3_header_gets_no_shift_in_rekordbox() {
+    let (_dir, root) = guest_copy();
+    let name = "OJ Click 126.mp3";
+    let mut zeroed = 0;
+    for entry in walk(&root) {
+        if entry.file_name().is_some_and(|n| n == name) {
+            let mut bytes = fs::read(&entry).unwrap();
+            let tag_len = 10
+                + bytes[6..10]
+                    .iter()
+                    .fold(0usize, |acc, b| (acc << 7) | usize::from(b & 0x7f));
+            for b in &mut bytes[tag_len..] {
+                *b = 0;
+            }
+            fs::write(&entry, bytes).unwrap();
+            zeroed += 1;
+        }
+    }
+    assert!(zeroed > 0);
+    let stick = read_stick(&root, "OJGUEST");
+    for app in [GuestApp::RekordboxDevice, GuestApp::RekordboxXml] {
+        let source = stick.sources.iter().find(|s| s.app == app).unwrap();
+        let t = source
+            .tracks
+            .iter()
+            .find(|t| t.title.as_deref() == Some("OJ Click 126") || t.path.ends_with(name))
+            .unwrap_or_else(|| panic!("{app:?}: no 126"));
+        // rekordbox's own 24 ms, as stored.
+        let first = t.first_beat.unwrap();
+        assert!((first - 0.024).abs() < 0.0006, "{app:?}: {first}");
+    }
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        if entry.file_type().unwrap().is_dir() {
+            out.extend(walk(&entry.path()));
+        } else {
+            out.push(entry.path());
+        }
+    }
+    out
 }

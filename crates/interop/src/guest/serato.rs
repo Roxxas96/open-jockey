@@ -294,10 +294,7 @@ fn tags_of(path: &Path) -> (Vec<GuestCue>, Option<(f64, f64)>) {
     let cues = markers.map_or_else(Vec::new, |data| {
         cues_from_markers(read_markers2(&data), shift)
     });
-    (
-        cues,
-        grid.map(|(first, bpm)| ((first - shift).max(0.0), bpm)),
-    )
+    (cues, grid.map(|(first, bpm)| (first - shift, bpm)))
 }
 
 /// The first beat (seconds) and BPM of a `Serato Tempo Map` frame, as Serato DJ writes it
@@ -368,7 +365,7 @@ fn cues_from_markers(markers: Vec<Marker>, shift: f64) -> Vec<GuestCue> {
             } if index < SLOTS && end_ms > start_ms => Some(GuestCue {
                 slot: index,
                 seconds: seconds(start_ms),
-                loop_seconds: Some(seconds(end_ms) - seconds(start_ms)),
+                loop_seconds: Some(f64::from(end_ms - start_ms) / 1000.0),
                 color: None,
                 name: named(name),
             }),
@@ -384,6 +381,19 @@ fn cues_from_markers(markers: Vec<Marker>, shift: f64) -> Vec<GuestCue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loop_that_starts_before_our_zero_keeps_its_length() {
+        let markers = vec![Marker::Loop {
+            index: 0,
+            start_ms: 20,
+            end_ms: 1020,
+            name: String::new(),
+        }];
+        let cues = cues_from_markers(markers, 0.050);
+        assert_eq!(cues[0].seconds, 0.0);
+        assert!((cues[0].loop_seconds.unwrap() - 1.0).abs() < 1e-9);
+    }
 
     #[test]
     fn a_serato_loop_never_takes_a_cue_slot() {
