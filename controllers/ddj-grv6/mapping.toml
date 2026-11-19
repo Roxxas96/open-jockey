@@ -1213,9 +1213,9 @@ deck = 4
 # so only the press on the channel of the deck being selected counts. `side.deck_toggle`
 # flips the side to its other deck, so each binding fires only while the side shows
 # the OTHER deck (`active_deck`): a press for the deck the side already shows does
-# nothing, and the toggle can never go the wrong way. The list gives 0x3C for DECK 3/4
-# and 0x72 for DECK 1/2 (header of the "Not mapped" list); both notes are bound on every
-# deck channel, and the capture settles which one each button sends.
+# nothing, and the toggle can never go the wrong way. Pioneer's list: each DECK press
+# sends note 0x3C, 0x7F on its own deck's channel and 0x00 on the other deck of that
+# side. 0x72 is SHIFT + DECK, sent on the opposite side's channel, so it stays unbound.
 
 [[input]]
 midi = { channel = 1, note = 0x3C }
@@ -1237,30 +1237,6 @@ active_deck = 4
 
 [[input]]
 midi = { channel = 4, note = 0x3C }
-action = "side.deck_toggle"
-side = "right"
-active_deck = 2
-
-[[input]]
-midi = { channel = 1, note = 0x72 }
-action = "side.deck_toggle"
-side = "left"
-active_deck = 3
-
-[[input]]
-midi = { channel = 3, note = 0x72 }
-action = "side.deck_toggle"
-side = "left"
-active_deck = 1
-
-[[input]]
-midi = { channel = 2, note = 0x72 }
-action = "side.deck_toggle"
-side = "right"
-active_deck = 4
-
-[[input]]
-midi = { channel = 4, note = 0x72 }
 action = "side.deck_toggle"
 side = "right"
 active_deck = 2
@@ -1425,7 +1401,7 @@ off = 0
 # Not mapped: controls in Pioneer's list without a binding, with their messages. Deck
 # controls shown for deck 1 (channel 1); decks 2-4 send the same on channels 2-4.
 #
-#   DECK SHIFT 0x73 (DECK 1-4 notes 0x72 / 0x3C are bound to side.deck_toggle)
+#   SHIFT + DECK 0x73 / 0x72 (DECK 1-4 note 0x3C is bound to side.deck_toggle)
 #   SHIFT + PLAY 0x47, SHIFT + BEAT SYNC 0x5C (as on the SB3)
 #   QUANTIZE 0x35, SHIFT 0x68         (Open Jockey has no quantize)
 #   KEY SYNC 0x65, SHIFT 0x64         (no key sync)
