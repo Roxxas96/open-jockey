@@ -232,7 +232,8 @@ noticed that loading a track takes a few seconds.
 
 Owner, 2026-11-10 and 11 (macOS; Serato DJ Lite, Rekordbox, VirtualDJ 2026). Playlists showed
 in order in all three, and hotcue positions were exact in all three (Serato MP3 with an Info
-frame 1152 frames later, the others unshifted; this was resolved by the MP3 offsets change, 2026-11-19, see `docs/interop.md`). Exporting again copied nothing new and showed
+frame 1152 frames later, the others unshifted; this was resolved by the MP3 offsets change,
+2026-11-19, see `docs/interop.md`). Exporting again copied nothing new and showed
 a moved hotcue; an unticked playlist disappeared from all three. Serato showed a repeated
 track once (its limit; the export now says so) and has no saved loops in DJ Lite (Pro only,
 not checked). Rekordbox imported the playlists through the XML; the steps are now in
@@ -290,6 +291,14 @@ Owner, 2026-11-14 (macOS):
 
 Asked for next (plan 12d): a footer with the open list's facts, the latest message, and one
 pill per background job, showing done / total and the time left, with Pause / Resume / Stop.
+
+### Hands-on check (MP3 offsets in Serato and rekordbox)
+
+Owner, 2026-11-19 (macOS; Serato DJ Lite, rekordbox 7.2.19): "Test were concluent, everything
+works." The eight OJCAL files (`crates/interop/tests/fixtures/ojcal/README.md`) got hotcue 1
+on their first click in Open Jockey and were exported to a stick, then checked zoomed right in
+in Serato and in rekordbox (through the XML), with the 22 kHz MPEG-2 file and the VBR one looked
+at hardest. The optional read-back as a guest stick was part of the steps given.
 
 ## The SB3's own pad routines
 
