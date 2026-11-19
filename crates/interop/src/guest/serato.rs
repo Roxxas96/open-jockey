@@ -14,7 +14,7 @@ use crate::export::FileKind;
 use crate::export::serato::markers::{Marker, read_markers2};
 use crate::export::serato::tags::{read_id3, serato_frames};
 use crate::export::serato::tlv::{Body, Record, decode, utf16be};
-use crate::export::timing::{App, app_offset_seconds};
+use crate::export::timing::{App, ours_seconds};
 
 /// Slots of a guest hotcue.
 const SLOTS: u8 = 8;
@@ -287,14 +287,19 @@ fn tags_of(path: &Path) -> (Vec<GuestCue>, Option<(f64, f64)>) {
     if markers.is_none() && grid.is_none() {
         return (Vec::new(), None);
     }
-    let shift = match (decode::lead_in(path), library::tags::read(path).sample_rate) {
-        (Ok(lead_in), Some(rate)) => app_offset_seconds(App::Serato, kind, &lead_in, rate),
-        _ => 0.0,
+    // Only an MP3 has a shift to remove; any other file skips the header and tag reads.
+    // A file whose header or rate cannot be read gets no shift.
+    let read = (kind == FileKind::Mp3)
+        .then(|| (decode::lead_in(path), library::tags::read(path).sample_rate))
+        .and_then(|(lead_in, rate)| Some((lead_in.ok()?, rate?)));
+    let to_ours = |seconds: f64| match &read {
+        Some((lead_in, rate)) => ours_seconds(App::Serato, seconds, kind.clone(), lead_in, *rate),
+        None => seconds,
     };
     let cues = markers.map_or_else(Vec::new, |data| {
-        cues_from_markers(read_markers2(&data), shift)
+        cues_from_markers(read_markers2(&data), to_ours)
     });
-    (cues, grid.map(|(first, bpm)| (first - shift, bpm)))
+    (cues, grid.map(|(first, bpm)| (to_ours(first), bpm)))
 }
 
 /// The first beat (seconds) and BPM of a `Serato Tempo Map` frame, as Serato DJ writes it
@@ -337,10 +342,11 @@ fn beatgrid(data: &[u8]) -> Option<(f64, f64)> {
     (first.is_finite() && bpm.is_finite() && bpm > 0.0).then_some((first, bpm))
 }
 
-/// Hotcues from `markers`, `shift` seconds earlier. A slot holds one cue: a cue wins over a
-/// loop at its index, and the first of any two at one index wins.
-fn cues_from_markers(markers: Vec<Marker>, shift: f64) -> Vec<GuestCue> {
-    let seconds = |ms: u32| (f64::from(ms) / 1000.0 - shift).max(0.0);
+/// Hotcues from `markers`, each start moved onto Open Jockey's timeline by `to_ours` and
+/// clamped at 0. A slot holds one cue: a cue wins over a loop at its index, and the first of
+/// any two at one index wins.
+fn cues_from_markers(markers: Vec<Marker>, to_ours: impl Fn(f64) -> f64) -> Vec<GuestCue> {
+    let seconds = |ms: u32| to_ours(f64::from(ms) / 1000.0).max(0.0);
     let named = |name: String| Some(name).filter(|n| !n.is_empty());
     let mut cues: Vec<GuestCue> = markers
         .into_iter()
@@ -390,7 +396,7 @@ mod tests {
             end_ms: 1020,
             name: String::new(),
         }];
-        let cues = cues_from_markers(markers, 0.050);
+        let cues = cues_from_markers(markers, |s| s - 0.050);
         assert_eq!(cues[0].seconds, 0.0);
         assert!((cues[0].loop_seconds.unwrap() - 1.0).abs() < 1e-9);
     }
@@ -417,7 +423,7 @@ mod tests {
                 name: String::new(),
             },
         ];
-        let cues = cues_from_markers(markers, 0.0);
+        let cues = cues_from_markers(markers, |s| s);
         let slots: Vec<u8> = cues.iter().map(|c| c.slot).collect();
         assert_eq!(slots, [1, 2]);
         assert_eq!(cues[0].loop_seconds, None);

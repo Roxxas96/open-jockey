@@ -42,6 +42,9 @@ pub fn app_offset_seconds(app: App, kind: FileKind, lead_in: &LeadIn, sample_rat
     let rate = f64::from(sample_rate);
     match app {
         App::Serato => {
+            // Also applies to an Info frame where our decoder trims nothing (delay 0 or
+            // unreadable, e.g. an unknown encoder): that case is unmeasured and the +50 ms
+            // is a guess.
             let mpeg2_frame = if lead_in.frame_samples == 576 {
                 576.0 / rate
             } else {

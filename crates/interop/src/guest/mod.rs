@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use crate::export::FileKind;
-use crate::export::timing::{App, app_offset_seconds};
+use crate::export::timing::{App, ours_seconds};
 
 pub(crate) mod anlz;
 mod pdb;
@@ -204,13 +204,14 @@ fn rekordbox_to_ours(track: &mut GuestTrack) {
     ) else {
         return;
     };
-    let offset = app_offset_seconds(App::Rekordbox, kind, &lead_in, rate);
-    let ours = |seconds: f64| (seconds - offset).max(0.0);
+    let to_ours =
+        |seconds: f64| ours_seconds(App::Rekordbox, seconds, kind.clone(), &lead_in, rate);
+    let clamped = |seconds: f64| to_ours(seconds).max(0.0);
     // The first beat is a grid phase, not a position: it keeps any negative value.
-    track.first_beat = track.first_beat.map(|s| s - offset);
-    track.main_cue = track.main_cue.map(ours);
+    track.first_beat = track.first_beat.map(to_ours);
+    track.main_cue = track.main_cue.map(clamped);
     for cue in &mut track.hotcues {
-        cue.seconds = ours(cue.seconds);
+        cue.seconds = clamped(cue.seconds);
     }
 }
 
