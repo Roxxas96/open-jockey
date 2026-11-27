@@ -37,7 +37,7 @@ lofty = "0.25.5"
 # Decodes embedded cover art and the covers found online (only JPEG and PNG, which tags
 # and the cover services carry), and encodes the covers kept as JPEG.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
-notify = "8.2.1"
+notify = "9.0.0"
 walkdir = "2.5.0"
 tempfile = "3.27.0"
 rustfft = "6.4.1"
